@@ -12,6 +12,7 @@ from jax import Array
 import numpy as np
 from jax.scipy.stats import norm
 from jax.scipy.linalg import solve_triangular
+from jax.tree_util import tree_map
 
 from experiments.corporate_bonds.model import log_potential, observation_logpdf, ou_diag_transition
 
@@ -88,12 +89,16 @@ def get_csmc_kernel(
     ts = jnp.cumsum(dts)
 
     # precompute exact OU transition dynamics and inverse cholesky factors
+    H = chol_H @ chol_H.T
     Fs, chol_Qs = jax.vmap(lambda dt: ou_diag_transition(A, chol_Q, dt))(dts)
-    # inv_chol_Q0 = solve_triangular(chol_Q0, jnp.eye(D), lower=True)
-    # inv_chol_H0 = solve_triangular(chol_H0, jnp.eye(D), lower=True)
+    inv_chol_Q0 = solve_triangular(chol_Q0, jnp.eye(D), lower=True)
+    inv_chol_H0 = solve_triangular(chol_H0, jnp.eye(D), lower=True)
 
     if style == "bootstrap":
 
+        ###################
+        #    filtering    #
+        ###################
         def M0_rvs(key, _):
             i = indices[0]
             m0 = jnp.zeros((N, D))
@@ -111,11 +116,7 @@ def get_csmc_kernel(
             m_pred = (m0, m0)
             P_pred = (P_pred_z, P_pred_eta)
             return u0, m_pred, P_pred
-
-        def M0_logpdf(u):
-            # need to implement the backward sampling stuff from Adrien here
-            return 0
-
+        
         def Mt_rvs(key, x_t_m_1, P_t_m_1, params):
             """
             Parameters
@@ -139,7 +140,6 @@ def get_csmc_kernel(
             z_i = m_pred_z[:, i_t] + eps_z * jnp.sqrt(P_pred_z[i_t, i_t])
 
             # sample mid-YtB for index id
-            H = chol_H @ chol_H.T
             P_pred_eta = P_eta + (dt * H)
             m_pred_eta = eta_t_m_1
             eta_i = m_pred_eta[:, i_t] + eps_eta * jnp.sqrt(P_pred_eta[i_t, i_t])
@@ -148,33 +148,105 @@ def get_csmc_kernel(
             m_pred_t = (m_pred_z, m_pred_eta)
             P_pred_t = (P_pred_z, P_pred_eta)
             return u_t, m_pred_t, P_pred_t
-            
-        def Mt_logpdf(x_t_m_1, u_t, params):
-            # need to implement the backward sampling stuff from Adrien here
-            return 0
-
-        def Gamma_0(u):
+        
+        def G_0(u):
             i = indices[0]
             z_i, eta_i = u
             val = log_potential(i, ys[0], z_i, eta_i, obs_types[0], alpha[i], psi, chol_R)
-            val += M0_logpdf(u)
             return val
         
-        def Gamma_t(x_t_m_1, u_t, params):
+        def G_t(x_t_m_1, u_t, params):
             y_t, obs_type_t, i_t, *_ = params
             z_i, eta_i = u_t
             val = log_potential(i_t, y_t, z_i, eta_i, obs_type_t, alpha[i_t], psi, chol_R)
-            val += Mt_logpdf(x_t_m_1, u_t, params)
             return val
+        
+        ###################
+        #    smoothing    #
+        ###################
+        def M0_logpdf(x):
+            # need to implement the backward sampling stuff from Adrien here
+            # t=0 half log-spreads logpdf
+            z, eta = x
+            m0 = jnp.zeros((N, D))
+            val = mvn_logpdf(z, m0, None, chol_inv=inv_chol_Q0)
+            val += mvn_logpdf(eta, m0, None, chol_inv=inv_chol_H0)
+            return val
+
+        def Mt_logpdf(x_t_m_1, P_t_m_1, x_t, params):
+            """
+            Log PDF calculated over whole vector x_t rather than single coords u_t = (z_i, eta_i)
+            """
+            # need to implement the backward sampling stuff from Adrien here
+            _, _, i_t, F_t, chol_Q_t, dt = params
+            z_t_m_1, eta_t_m_1 = x_t_m_1
+            z_t, eta_t = x_t
+            P_z, P_eta = P_t_m_1
+
+            # calculate log half-spread logpdf
+            m_pred_z = z_t_m_1 @ F_t.T
+            Q = chol_Q_t @ chol_Q_t.T
+            P_pred_z = (F_t @ P_z @ F_t.T) + Q
+            chol_P_pred_z = jnp.linalg.cholesky(P_pred_z)
+            inv_chol_P_pred_z = solve_triangular(chol_P_pred_z, jnp.eye(D), lower=True)
+            val = mvn_logpdf(z_t, m_pred_z, None, chol_inv=inv_chol_P_pred_z, constant=False)
+
+            # calculate mid-YtB logpdf
+            m_pred_eta = eta_t_m_1
+            P_pred_eta = P_eta + (dt * H)
+            chol_P_pred_eta = jnp.linalg.cholesky(P_pred_eta)
+            inv_chol_P_pred_eta = solve_triangular(chol_P_pred_eta, jnp.eye(D), lower=True)
+            val += mvn_logpdf(eta_t, m_pred_eta, None, chol_inv=inv_chol_P_pred_eta, constant=False)
+
+            return val
+        
+        def Gamma_t(x_t_m_1, P_t_m_1, x_t, params):
+            _, _, i_t, _, chol_Q_t, dt = params
+            P_z, P_eta = P_t_m_1
+            z_t, eta_t = x_t
+            z_t_m_1, eta_t_m_1 = x_t_m_1
+            
+            # smoothing weight factor
+            u_t = tree_map(lambda u: u[i_t], x_t)
+            val = G_t(x_t_m_1, u_t, params)
+            val += Mt_logpdf(x_t_m_1, P_t_m_1, x_t, params)
+
+            # smoothing log half-spreads
+            Q = chol_Q_t @ chol_Q_t.T
+            J_z = P_z @ jnp.linalg.inv(P_z + Q)
+            m_smooth_z = z_t_m_1 + J_z @ (z_t - z_t_m_1)
+            P_smooth_z = P_z - (J_z @ P_z)
+
+            # smoothing mid-YtBs
+            J_eta = P_eta @ jnp.linalg.inv(P_eta + H)
+            m_smooth_eta = eta_t_m_1 + J_eta @ (eta_t - eta_t_m_1)
+            P_smooth_eta = P_eta - (J_eta @ P_eta)
+
+            m_smooth = (m_smooth_z, m_smooth_eta)
+            P_smooth = (P_smooth_z, P_smooth_eta)
+            return val, m_smooth, P_smooth
+
 
     inps = (ys[1:], obs_types[1:], indices[1:], Fs[1:], chol_Qs[1:], dts[1:]) 
     M0 = M0_rvs, M0_logpdf
     Mt = Mt_rvs, Mt_logpdf, inps
+    G_t_plus_params = G_t, inps
     Gamma_t_plus_params = Gamma_t, inps
 
-    kernel = lambda key, state, *_: rb_csmc.kernel(key, state[0], state[1], indices, M0, Gamma_0, Mt, Gamma_t_plus_params, 
-                                                N=N, **kwargs)
     init = lambda x: (x, jnp.zeros((T,), dtype=int))
+    kernel = lambda key, state, *_: rb_csmc.kernel(
+        key, 
+        state[0], 
+        state[1], 
+        indices,
+        M0, 
+        G_0, 
+        Mt, 
+        G_t_plus_params,
+        Gamma_t_plus_params,
+        N=N, 
+        **kwargs
+    )
 
     return kernel, init
         

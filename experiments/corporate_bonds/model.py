@@ -165,10 +165,10 @@ def get_data(
         dts: Array,
         A: Array,
         psi: Array,
-        chol_P0_z: Array,
-        chol_P0_eta: Array,
-        chol_Q_z: Array,
-        chol_Q_eta: Array,
+        chol_Q0: Array,
+        chol_Q: Array,
+        chol_H0: Array,
+        chol_H: Array,
         chol_R: Array,
         alpha: Array,
         sparsity_factor: float = 10.0,
@@ -183,10 +183,10 @@ def get_data(
     dts:             (K,) Time increments
     A:               (dim, dim) Discrete-time transition matrix for z
     psi:             (dim,) Baseline half-spread scale
-    chol_P0_z:       (dim, dim) Initial Cholesky factor for z_0
-    chol_P0_eta:     (dim, dim) Initial Cholesky factor for eta_0
-    chol_Q_z:        (dim, dim) Transition Cholesky factor for z
-    chol_Q_eta:      (dim, dim) Transition Cholesky factor for eta
+    chol_Q0:         (dim, dim) Initial Cholesky factor for z_0
+    chol_Q:          (dim, dim) Transition Cholesky factor for z
+    chol_H0:         (dim, dim) Initial Cholesky factor for eta_0
+    chol_H:          (dim, dim) Transition Cholesky factor for eta
     chol_R:          (dim,) or (dim, dim) Observation noise standard deviations
     alpha:           (dim,) D2D interval half-widths
     sparsity_factor: Observation frequency ratio between non-final bonds and final bond.
@@ -205,8 +205,8 @@ def get_data(
 
     init_key_z, init_key_eta = jax.random.split(init_key)
 
-    z0 = chol_P0_z @ jax.random.normal(init_key_z, (dim,))
-    eta0 = chol_P0_eta @ jax.random.normal(init_key_eta, (dim,))
+    z0 = chol_Q0 @ jax.random.normal(init_key_z, (dim,))
+    eta0 = chol_H0 @ jax.random.normal(init_key_eta, (dim,))
 
     key_bond, key_type, key_y = jax.random.split(event_key, 3)
 
@@ -218,7 +218,7 @@ def get_data(
     event_types = jax.random.randint(key_type, (K,), minval=0, maxval=5)
     keys_y = jax.random.split(key_y, K)
 
-    z_Fs, z_chol_Bs = jax.vmap(lambda dt: ou_diag_transition(A, chol_Q_z, dt))(dts)
+    Fs, chol_Bs = jax.vmap(lambda dt: ou_diag_transition(A, chol_Q, dt))(dts)
     eps_zs, eps_etas = jax.random.normal(sampling_key, (2, K, dim))
 
     def body(carry, inps):
@@ -227,22 +227,22 @@ def get_data(
 
         # sample next latent state
         z_kp1 = z_k @ F.T + eps_z @ chol_B.T
-        eta_kp1 = eta_k + jnp.sqrt(dt) * (eps_eta @ chol_Q_eta.T)
+        eta_kp1 = eta_k + jnp.sqrt(dt) * (eps_eta @ chol_H.T)
         x_kp1 = (z_kp1, eta_kp1)
 
         # sample observation
         obs_value = emission(key_y_k, z_kp1, eta_kp1, psi, chol_R, alpha, bond_idx, event_type)
-        obs_k = (bond_idx, event_type, alpha[bond_idx], obs_value)
+        obs_k = (obs_value, bond_idx, event_type)
 
         return x_kp1, (x_kp1, obs_k)
 
     carry0 = (z0, eta0)
-    inps = (dts, z_Fs, z_chol_Bs, eps_zs, eps_etas, keys_y, bond_idxs, event_types)
+    inps = (dts, Fs, chol_Bs, eps_zs, eps_etas, keys_y, bond_idxs, event_types)
     _, (xs, obs) = jax.lax.scan(body, carry0, inps)
     return xs, obs
 
 
-@partial(jnp.vectorize, signature="(d),(d)->()", excluded=(2, 3, 4))
+@partial(jnp.vectorize, signature="(d),(d)->()", excluded=(0, 1, 4, 5, 6, 7, 8))
 def log_potential(
         i,
         y,
