@@ -18,8 +18,9 @@ def kernel(
         b_star: Array, 
         indices: Array,
         M_0: tuple[Callable, Callable], 
-        Gamma_0: Callable,
+        G_0: Callable,
         M_t: Union[tuple[Callable, Callable], tuple[Callable, Callable, Any]],
+        G_t: Union[Callable, tuple[Callable, Any]],
         Gamma_t: Union[Callable, tuple[Callable, Any]],
         resampling_func: Callable, 
         ancestor_move_func: Callable, 
@@ -55,24 +56,25 @@ def kernel(
     bs:  Indices of the ancestors.
     """
 
-    As, Gamma_params, Gamma_t, key_backward, log_ws, xs = forward_pass(
+    As, key_backward, log_ws, xs, Ps = forward_pass(
         key, 
         x_star, b_star, 
         indices, 
-        M_0, Gamma_0, 
-        M_t, Gamma_t,
+        M_0, G_0, 
+        M_t, G_t,
         resampling_func, N, conditional
     )
 
     #################################
     #        Backward pass          #
     #################################
+    Gamma_t, Gamma_params = Gamma_t if isinstance(Gamma_t, tuple) else (Gamma_t, None)
     if backward:
-        xs, Bs = backward_sampling_pass(key_backward, Gamma_t, Gamma_params, b_star[-1], xs, log_ws,
+        xs, us, Bs = backward_sampling_pass(key_backward, Gamma_t, Gamma_params, b_star[-1], xs, Ps, log_ws,
                                         ancestor_move_func, conditional)
     else:
-        xs, Bs = backward_scanning_pass(key_backward, As, b_star[-1], xs, log_ws[-1], ancestor_move_func)
-    return xs, Bs, log_ws
+        xs, us, Bs = backward_scanning_pass(key_backward, As, b_star[-1], xs, Ps, log_ws[-1], ancestor_move_func)
+    return us, Bs, log_ws
 
 
 def forward_pass(
@@ -81,9 +83,9 @@ def forward_pass(
         b_star: Array,
         indices: Array, 
         M_0: tuple[Callable, Callable], 
-        Gamma_0: Callable,
+        G_0: Callable,
         M_t: Union[tuple[Callable, Callable], tuple[Callable, Callable, Any]],
-        Gamma_t: Union[Callable, tuple[Callable, Any]],
+        G_t: Union[Callable, tuple[Callable, Any]],
         resampling_func: Callable,
         N: int, 
         conditional=True
@@ -123,7 +125,7 @@ def forward_pass(
 
     key_init, key_loop, key_backward = jax.random.split(key, 3)
     # Unpack Gamma_function
-    Gamma_t, Gamma_params = Gamma_t if isinstance(Gamma_t, tuple) else (Gamma_t, None)
+    G_t, G_params = G_t if isinstance(G_t, tuple) else (G_t, None)
     M_t_rvs, M_t_logpdf, prop_params = M_t if len(M_t) == 3 else (*M_t, None)
     M_0_rvs, M_0_logpdf = M_0
 
@@ -135,7 +137,7 @@ def forward_pass(
     #     u0 = tree_map(lambda x0_, xs0_: x0_.at[b_star[0]].set(xs0_), u0, tree_map(lambda x: x[0], x_star))  # TODO fix this ie set at bond idx
 
     # Compute initial weights and normalize
-    log_w0 = Gamma_0(u_0) - M_0_logpdf(u_0)
+    log_w0 = G_0(u_0)
     log_w0 = normalize(log_w0, log_space=True)
     w0 = jnp.exp(log_w0)
 
@@ -148,7 +150,7 @@ def forward_pass(
     #################################
     def body(carry, inp):
         w_t_m_1, x_t_m_1, P_t_m_1 = carry
-        M_t_params, Gamma_params_t, b_star_t_m_1, b_star_t, key_t, x_star_t, idx_t = inp
+        M_t_params, G_params_t, b_star_t_m_1, b_star_t, key_t, x_star_t, idx_t = inp
 
         key_proposal_t, key_resampling_t = jax.random.split(key_t, 2)
 
@@ -162,7 +164,7 @@ def forward_pass(
         # if conditional:
         #     x_t = tree_map(lambda xt_, xs_t_: xt_.at[b_star_t].set(xs_t_), x_t, x_star_t)
 
-        log_w_t = Gamma_t(x_t_m_1, u_t, Gamma_params_t) - M_t_logpdf(x_t_m_1, u_t, M_t_params)
+        log_w_t = G_t(x_t_m_1, u_t, G_params_t)
         log_w_t = normalize(log_w_t, log_space=True)
         w_t = jnp.exp(log_w_t)
 
@@ -178,89 +180,116 @@ def forward_pass(
 
     # Run forward cSMC
     keys_loop = jax.random.split(key_loop, T - 1)
-    inputs = prop_params, Gamma_params, b_star[:-1], b_star[1:], keys_loop, tree_map(lambda x: x[1:], x_star), indices[1:]
+    inputs = prop_params, G_params, b_star[:-1], b_star[1:], keys_loop, tree_map(lambda x: x[1:], x_star), indices[1:]
     _, (log_ws, As, xs, Ps) = jax.lax.scan(body, (w0, x0, P0), inputs)
 
     # Insert initial weight and particle
     log_ws = jnp.insert(log_ws, 0, log_w0, axis=0)
     xs = tree_map(lambda xs_, x0_: jnp.insert(xs_, 0, x0_, axis=0), xs, x0)
-    return As, Gamma_params, Gamma_t, key_backward, log_ws, xs
+    Ps = tree_map(lambda Ps_, P0_: jnp.insert(Ps_, 0, P0_, axis=0), Ps, P0)
+    return As, key_backward, log_ws, xs, Ps
 
 
-def backward_sampling_pass(key, Gamma_func, Gamma_params, b_star_T, xs, log_ws, ancestor_move_func,
+def backward_sampling_pass(key, Gamma_func, Gamma_params, b_star_T, xs, Ps, log_ws, ancestor_move_func,
                            conditional: bool = True):
     """
     Backward sampling pass for the cSMC kernel.
 
     Parameters
     ----------
-    key:
-        Random number generator key.
-    Gamma_func:
-        Weight increments function.
-    Gamma_params:
-        Parameters for the Gamma function.
-    b_star_T:
-        Index of the last ancestor.
-    xs:
-        Array of particles.
-    log_ws:
-        Array of log-weights for the filtering solution.
-    ancestor_move_func:
-        Function to move the last ancestor indices.
-    conditional:
-        Whether to do conditional SMC or just SMC.
+    key:                 Random number generator key.
+    Gamma_func:          Weight increments function.
+    Gamma_params:        Parameters for the Gamma function.
+    b_star_T:            Index of the last ancestor.
+    xs:                  Array of particles.
+    xs:                  Array of particle-independent covariance matrices.
+    log_ws:              Array of log-weights for the filtering solution.
+    ancestor_move_func:  Function to move the last ancestor indices.
+    conditional:         Whether to do conditional SMC or just SMC.
 
     Returns
     -------
-    xs:
-        Array of particles.
-    Bs:
-        Array of indices of the last ancestor.
+    xs:  Array of particles.
+    Ps:  Array of particle-independent smoothing covariances
+    Bs:  Array of indices of the last ancestor.
     """
     ###############################
     #        HOUSEKEEPING         #
     ###############################
 
     T = tree_leaves(xs)[0].shape[0]
-    keys = jax.random.split(key, T)
+    move_key, sim_key = jax.random.split(key)
+    move_keys = jax.random.split(move_key, T)
+    sim_keys = jax.random.split(sim_key, T)
+
+    ###############################
+    #     SIMULATION FUNCTION     #
+    ###############################
+    def simulate(key, x, P):
+        """ Simulate the trajectory from the selected means """
+        D = x.shape[-1]
+        chol_P = jnp.linalg.cholesky(P)
+        eps = jax.random.normal(key, (D,))
+        return x + eps @ chol_P.T
 
     ###############################
     #        BACKWARD PASS        #
     ###############################
     # Select last ancestor
     if not conditional:
-        B_T, _ = barker_move(keys[-1], normalize(log_ws[-1]), None)
+        B_T, _ = barker_move(move_keys[-1], normalize(log_ws[-1]), None)
     else:
-        B_T, _ = ancestor_move_func(keys[-1], normalize(log_ws[-1]), b_star_T)
+        B_T, _ = ancestor_move_func(move_keys[-1], normalize(log_ws[-1]), b_star_T)
+    
     x_T = tree_map(lambda x: x[-1, B_T], xs)
+    P_T = tree_map(lambda P: P[-1], Ps)
+    u_T = tree_map(simulate, sim_keys[-1], x_T, P_T)
 
-    def body(x_t, inp):
-        op_key, xs_t_m_1, log_w_t_m_1, Gamma_params_t = inp
-        Gamma_log_w = Gamma_func(xs_t_m_1, x_t, Gamma_params_t)
+    def body(carry, inp):
+        x_t, u_t = carry
+        op_key, sim_key, xs_t_m_1, P_t_m_1, log_w_t_m_1, Gamma_params_t = inp
+
+        # calculate smoothing weight
+        Gamma_log_w, ms_smooth, P_smooth = Gamma_func(xs_t_m_1, P_t_m_1, u_t, Gamma_params_t)
         Gamma_log_w -= jnp.max(Gamma_log_w)
         log_w = Gamma_log_w + log_w_t_m_1
         w = normalize(log_w)
+
+        # index ancestor
         B_t_m_1 = jax.random.choice(op_key, w.shape[0], p=w, shape=())
-        x_t_m_1 = tree_map(lambda x: x[B_t_m_1], xs_t_m_1)
-        return x_t_m_1, (x_t_m_1, B_t_m_1)
+        m_smooth = tree_map(lambda m: m[B_t_m_1], ms_smooth)
+
+        # sample smoothing trajectory
+        u_t_m_1 = tree_map(simulate, sim_key, m_smooth, P_smooth)
+
+        return (m_smooth, u_t_m_1), (m_smooth, u_t_m_1, B_t_m_1)
 
     # Reverse arrays, ideally, should use jax.lax.scan(reverse=True) but it is simpler this way due to insertions.
     # xs[-2::-1] is the reversed list of xs[:-1], I know, not readable... Same for log_ws.
     Gamma_params = tree_map(lambda x: x[::-1], Gamma_params)
-    inps = keys[:-1], tree_map(lambda x: x[-2::-1], xs), log_ws[-2::-1], Gamma_params
+    inps = (
+        move_keys[:-1],
+        sim_keys[:-1], 
+        tree_map(lambda x: x[-2::-1], xs), 
+        tree_map(lambda P: P[-2::-1], Ps), 
+        log_ws[-2::-1],
+        Gamma_params
+    )
 
     # Run backward pass
-    _, (xs, Bs) = jax.lax.scan(body, x_T, inps)
+    _, (xs, us, Bs) = jax.lax.scan(body, (x_T, u_T), inps)
 
     # Insert last ancestor and particle
-    # xs = jnp.insert(xs, 0, x_T, axis=0)
-    xs = tree_map(lambda xs_, xT_: jnp.insert(xs_, 0, xT_, axis=0), xs, x_T)
     Bs = jnp.insert(Bs, 0, B_T, axis=0)
-    return tree_map(lambda x: x[::-1], xs), Bs[::-1]
+    xs = tree_map(lambda xs_, xT_: jnp.insert(xs_, 0, xT_, axis=0), xs, x_T)
+    us = tree_map(lambda us_, uT_: jnp.insert(us_, 0, uT_, axis=0), us, u_T)
+    xs = tree_map(lambda x: x[::-1], xs)
+    us = tree_map(lambda u: u[::-1], us)
+
+    return xs, us, Bs[::-1]
 
 
-def backward_scanning_pass(key, As, b_star_T, xs, log_w_T, ancestor_move_func):
+def backward_scanning_pass(key, As, b_star_T, xs, Ps, log_w_T, ancestor_move_func):
     """
     Backward scanning pass for the cSMC kernel.
 
