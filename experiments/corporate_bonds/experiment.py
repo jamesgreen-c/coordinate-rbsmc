@@ -32,9 +32,8 @@ parser.set_defaults(independent=False)
 parser.add_argument("--log-var", dest="log_var", type=float, default=0)
 parser.add_argument("--phi", dest="phi", type=float, default=0.8)
 
-
 parser.add_argument("--seed", dest="seed", type=int, default=1234)
-parser.add_argument("--style", dest="style", type=str, default="guided")
+parser.add_argument("--style", dest="style", type=str, default="bootstrap")
 
 parser.add_argument("--backward", action='store_true')
 parser.add_argument('--no-backward', dest='backward', action='store_false')
@@ -49,7 +48,7 @@ parser.add_argument('--no-debug', dest='debug', action='store_false')
 parser.set_defaults(debug=False)
 
 args = parser.parse_args()
-kernel_type = KernelType.GUEANT
+kernel_type = KernelType.CSMC
 
 print(f"""
 ##################################
@@ -90,14 +89,13 @@ CHOL_Q0 = 0.1 * jnp.eye(args.D)
 CHOL_H0 = 0.1 * jnp.eye(args.D)
 CHOL_Q = 10 ** (args.log_var / 2) * jnp.eye(args.D)  # independent spreads
 
-vol_eta = 0.10 * jnp.array([1.00, 1.24, 1.38])
-corr_eta = jnp.array([
-    [1.000, 0.60, 0.58],
-    [0.60, 1.000, 0.65],
-    [0.58, 0.65, 1.000],
-])
-Q_eta = corr_eta * vol_eta[:, None] * vol_eta[None, :]
-CHOL_H_TRUE = jnp.linalg.cholesky(Q_eta)
+def make_eta_chol(D, base_vol=0.10, vol_slope=0.40, corr=0.60):
+    vol_eta = base_vol * jnp.linspace(1.0, 1.0 + vol_slope, D)
+    corr_eta = (1.0 - corr) * jnp.eye(D) + corr * jnp.ones((D, D))
+    H = corr_eta * vol_eta[:, None] * vol_eta[None, :]
+    return jnp.linalg.cholesky(H)
+
+CHOL_H_TRUE = make_eta_chol(args.D)
 
 if args.independent:
     CHOL_H = 0.1 * jnp.eye(args.D)
