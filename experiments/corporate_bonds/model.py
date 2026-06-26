@@ -242,7 +242,7 @@ def get_data(
     return xs, obs
 
 
-@partial(jnp.vectorize, signature="(d),(d)->()", excluded=(0, 1, 4, 5, 6, 7, 8))
+# @partial(jnp.vectorize, signature="(n),(n)->()", excluded=(0, 1, 4, 5, 6, 7, 8))
 def log_potential(
         i,
         y,

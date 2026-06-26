@@ -14,7 +14,7 @@ from jax.scipy.stats import norm
 from jax.scipy.linalg import solve_triangular
 from jax.tree_util import tree_map
 
-from experiments.corporate_bonds.model import log_potential, observation_logpdf, ou_diag_transition
+from experiments.corporate_bonds.model import log_potential, ou_diag_transition
 
 from rbsmc.utils.math import mvn_logpdf
 from rbsmc.utils.mcmc_utils import aux_sampling_routine, delta_adaptation_routine
@@ -101,8 +101,8 @@ def get_csmc_kernel(
         ###################
         def M0_rvs(key, _):
             i = indices[0]
-            m0 = jnp.zeros((N, D))
-            eps_z, eps_eta = jr.normal(key, shape=(2, N))
+            m0 = jnp.zeros((N+1, D))
+            eps_z, eps_eta = jr.normal(key, shape=(2, N+1))
             
             # log half-spread
             P_pred_z = chol_Q0 @ chol_Q0.T 
@@ -131,7 +131,7 @@ def get_csmc_kernel(
             _, _, i_t, F_t, chol_Q_t, dt = params
             z_t_m_1, eta_t_m_1 = x_t_m_1
             P_z, P_eta = P_t_m_1
-            eps_z, eps_eta = jr.normal(key, shape=(2, N))
+            eps_z, eps_eta = jr.normal(key, shape=(2, N+1))
 
             # sample log half-spread at index i
             Q = chol_Q_t @ chol_Q_t.T
@@ -143,7 +143,7 @@ def get_csmc_kernel(
             P_pred_eta = P_eta + (dt * H)
             m_pred_eta = eta_t_m_1
             eta_i = m_pred_eta[:, i_t] + eps_eta * jnp.sqrt(P_pred_eta[i_t, i_t])
-            
+
             u_t = (z_i, eta_i)
             m_pred_t = (m_pred_z, m_pred_eta)
             P_pred_t = (P_pred_z, P_pred_eta)
@@ -168,7 +168,7 @@ def get_csmc_kernel(
             # need to implement the backward sampling stuff from Adrien here
             # t=0 half log-spreads logpdf
             z, eta = x
-            m0 = jnp.zeros((N, D))
+            m0 = jnp.zeros((N+1, D))
             val = mvn_logpdf(z, m0, None, chol_inv=inv_chol_Q0)
             val += mvn_logpdf(eta, m0, None, chol_inv=inv_chol_H0)
             return val
@@ -198,29 +198,32 @@ def get_csmc_kernel(
             inv_chol_P_pred_eta = solve_triangular(chol_P_pred_eta, jnp.eye(D), lower=True)
             val += mvn_logpdf(eta_t, m_pred_eta, None, chol_inv=inv_chol_P_pred_eta, constant=False)
 
-            return val
+            m_pred = (m_pred_z, m_pred_eta)
+            P_pred = (P_pred_z, P_pred_eta)
+            return val, m_pred, P_pred
         
         def Gamma_t(x_t_m_1, P_t_m_1, x_t, params):
-            _, _, i_t, _, chol_Q_t, dt = params
+            _, _, i_t, F_t, chol_Q_t, dt = params
             P_z, P_eta = P_t_m_1
             z_t, eta_t = x_t
             z_t_m_1, eta_t_m_1 = x_t_m_1
+
+            val, m_pred, P_pred = Mt_logpdf(x_t_m_1, P_t_m_1, x_t, params)
+            # u_t = tree_map(lambda u: u[i_t], x_t)
+            # val += G_t(x_t_m_1, u_t, params)
             
-            # smoothing weight factor
-            u_t = tree_map(lambda u: u[i_t], x_t)
-            val = G_t(x_t_m_1, u_t, params)
-            val += Mt_logpdf(x_t_m_1, P_t_m_1, x_t, params)
+            m_pred_z, m_pred_eta = m_pred
+            P_pred_z, P_pred_eta = P_pred
 
-            # smoothing log half-spreads
-            Q = chol_Q_t @ chol_Q_t.T
-            J_z = P_z @ jnp.linalg.inv(P_z + Q)
-            m_smooth_z = z_t_m_1 + J_z @ (z_t - z_t_m_1)
-            P_smooth_z = P_z - (J_z @ P_z)
+            J_z = P_z @ F_t.T @ jnp.linalg.inv(P_pred_z)
+            m_smooth_z = z_t_m_1 + (z_t - m_pred_z) @ J_z.T
+            P_smooth_z = P_z - J_z @ P_pred_z @ J_z.T
+            P_smooth_z = 0.5 * (P_smooth_z + P_smooth_z.T)
 
-            # smoothing mid-YtBs
-            J_eta = P_eta @ jnp.linalg.inv(P_eta + H)
-            m_smooth_eta = eta_t_m_1 + J_eta @ (eta_t - eta_t_m_1)
-            P_smooth_eta = P_eta - (J_eta @ P_eta)
+            J_eta = P_eta @ jnp.linalg.inv(P_pred_eta)
+            m_smooth_eta = eta_t_m_1 + (eta_t - m_pred_eta) @ J_eta.T
+            P_smooth_eta = P_eta - J_eta @ P_eta
+            P_smooth_eta = 0.5 * (P_smooth_eta + P_smooth_eta.T)
 
             m_smooth = (m_smooth_z, m_smooth_eta)
             P_smooth = (P_smooth_z, P_smooth_eta)
@@ -244,7 +247,7 @@ def get_csmc_kernel(
         Mt, 
         G_t_plus_params,
         Gamma_t_plus_params,
-        N=N, 
+        N=N+1, 
         **kwargs
     )
 
