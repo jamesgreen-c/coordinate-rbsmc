@@ -6,7 +6,7 @@ from typing import Callable, Union, Any
 import jax
 from chex import Array, PRNGKey
 from jax import numpy as jnp
-from jax.tree_util import tree_map, tree_leaves
+from jax.tree_util import tree_map, tree_leaves, tree_structure, tree_unflatten
 
 from rbsmc.utils.common import barker_move
 from rbsmc.utils.resamplings import normalize
@@ -69,11 +69,8 @@ def kernel(
     #        Backward pass          #
     #################################
     Gamma_t, Gamma_params = Gamma_t if isinstance(Gamma_t, tuple) else (Gamma_t, None)
-    if backward:
-        xs, us, Bs = backward_sampling_pass(key_backward, Gamma_t, Gamma_params, b_star[-1], xs, Ps, log_ws,
+    xs, us, Bs = backward_sampling_pass(key_backward, Gamma_t, Gamma_params, b_star[-1], xs, Ps, log_ws,
                                         ancestor_move_func, conditional)
-    else:
-        xs, us, Bs = backward_scanning_pass(key_backward, As, b_star[-1], xs, Ps, log_ws[-1], ancestor_move_func)
     return us, Bs, log_ws
 
 
@@ -225,12 +222,22 @@ def backward_sampling_pass(key, Gamma_func, Gamma_params, b_star_T, xs, Ps, log_
     ###############################
     #     SIMULATION FUNCTION     #
     ###############################
+    # def simulate(key, x, P):
+    #     """ Simulate the trajectory from the selected means """
+    #     D = x.shape[-1]
+    #     chol_P = jnp.linalg.cholesky(P)
+    #     eps = jax.random.normal(key, (D,))
+    #     return x + eps @ chol_P.T
+
     def simulate(key, x, P):
-        """ Simulate the trajectory from the selected means """
-        D = x.shape[-1]
-        chol_P = jnp.linalg.cholesky(P)
-        eps = jax.random.normal(key, (D,))
-        return x + eps @ chol_P.T
+        """Simulate from a possibly singular Gaussian N(x, P)."""
+        P = 0.5 * (P + P.T)
+        eigs, vecs = jnp.linalg.eigh(P)
+        eigs = jnp.clip(eigs, min=0.0)
+
+        eps = jax.random.normal(key, x.shape)
+        L = vecs * jnp.sqrt(eigs)[None, :]
+        return x + eps @ L.T
 
     ###############################
     #        BACKWARD PASS        #
@@ -243,7 +250,7 @@ def backward_sampling_pass(key, Gamma_func, Gamma_params, b_star_T, xs, Ps, log_
     
     x_T = tree_map(lambda x: x[-1, B_T], xs)
     P_T = tree_map(lambda P: P[-1], Ps)
-    u_T = tree_map(simulate, sim_keys[-1], x_T, P_T)
+    u_T = tree_map(simulate, _split_key_like(sim_keys[-1], x_T), x_T, P_T)
 
     def body(carry, inp):
         x_t, u_t = carry
@@ -260,7 +267,7 @@ def backward_sampling_pass(key, Gamma_func, Gamma_params, b_star_T, xs, Ps, log_
         m_smooth = tree_map(lambda m: m[B_t_m_1], ms_smooth)
 
         # sample smoothing trajectory
-        u_t_m_1 = tree_map(simulate, sim_key, m_smooth, P_smooth)
+        u_t_m_1 = tree_map(simulate, _split_key_like(sim_key, m_smooth), m_smooth, P_smooth)
 
         return (m_smooth, u_t_m_1), (m_smooth, u_t_m_1, B_t_m_1)
 
@@ -377,3 +384,9 @@ def _marginalise_covs(i: Array, P_pred: Array):
     G = P_pred[:, i] / P_pred[i, i]
     P = P_pred - jnp.outer(G, P_pred[i, :])
     return 0.5 * (P + P.T)
+
+def _split_key_like(key, tree):
+    leaves = tree_leaves(tree)
+    treedef = tree_structure(tree)
+    keys = jax.random.split(key, len(leaves))
+    return tree_unflatten(treedef, keys)
