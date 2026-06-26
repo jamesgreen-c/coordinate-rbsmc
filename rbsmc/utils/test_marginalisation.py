@@ -5,7 +5,7 @@ import numpy.testing as npt
 import pytest
 from jax.scipy.stats import multivariate_normal as mvn
 
-from cd_ssm.utils.marginalisation import get_log_H
+from rbsmc.utils.marginalisation import get_log_H
 
 
 @pytest.fixture(scope='module', autouse=True)
