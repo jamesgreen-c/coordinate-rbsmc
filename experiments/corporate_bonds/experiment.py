@@ -117,7 +117,7 @@ def one_experiment(key):
     true_xs, (ys, indices, obs_types), *_ = get_data(
         data_key, args.D, DTs, 
         A, PSI, CHOL_Q0, CHOL_Q, CHOL_H0, CHOL_H_TRUE, CHOL_R, ALPHA,
-        sparsity_factor=10.0
+        sparsity_factor=5.0
     )
 
     csmc_kernel, csmc_init, *_ = get_csmc_kernel(
