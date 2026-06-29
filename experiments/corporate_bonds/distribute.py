@@ -1,6 +1,7 @@
 import argparse
 import os
 import shlex
+import subprocess
 
 from rbsmc.utils.printing import ctext
 from experiments.corporate_bonds.kernels import KernelType
@@ -172,4 +173,4 @@ for j in indices:
     print("\nExecuting:", ctext(f"[{j}/{len(COMBINATIONS) - 1}] D={D}, T={T}, steps={steps} :: {exec_str}", "green"))
 
     if args.run:
-        os.system(cmd)
+        subprocess.run(cmd, check=True)
