@@ -19,17 +19,21 @@ from experiments.corporate_bonds.model import log_potential, ou_diag_transition
 from rbsmc.utils.math import mvn_logpdf
 from rbsmc.utils.mcmc_utils import aux_sampling_routine, delta_adaptation_routine
 from rbsmc import rb_csmc
+from rbsmc import csmc
 # from cd_ssm import gueant as gueant_csmc
 
 
 class KernelType(Enum):
     CSMC = 0
-    GUEANT = 1
+    RB_CSMC = 1
+    GUEANT = 2
     
     @property
     def kernel_maker(self):
         if self == KernelType.CSMC:
             return get_csmc_kernel
+        elif self == KernelType.RB_CSMC:
+            return get_rb_csmc_kernel
         elif self == KernelType.GUEANT:
             return get_gueant_csmc_kernel
         else:
@@ -38,6 +42,8 @@ class KernelType(Enum):
     
     def shape_delta(self, delta, T):
         if self == KernelType.CSMC:
+            return delta
+        elif self == KernelType.RB_CSMC:
             return delta
         elif self == KernelType.GUEANT:
             return delta
@@ -50,6 +56,141 @@ class KernelType(Enum):
 #######################
 
 def get_csmc_kernel(
+        ys: Array,
+        indices: Array,
+        obs_types: Array,
+        alpha: Array,
+        psi: Array,
+        A: Array,
+        chol_Q0: Array,
+        chol_Q: Array,
+        chol_H0: Array,
+        chol_H: Array,
+        chol_R: Array, 
+        N, 
+        dts,
+        style="bootstrap",
+        **kwargs
+):
+    """
+    
+    Paramters
+    ---------
+    ys:         (T,) Observation values,
+    indices:    (T,) Index of the relevant dimension at observation t
+    obs_types:  (T,) The class of observation ie D2C, D2D, RFQ
+    alpha:      (D,) The acceptable width of D2D trades for each bond
+    psi:        (D,) Half-spread scale
+    A:          (D, D) Diagonal transition matrix for the log half-spreads zs
+    chol_Q0:    (D, D) Cholesky of the initial covariance matrix of zs
+    chol_Q:     (D, D) Cholesky of the covariance matrix of zs
+    chol_H0:    (D, D) Cholesky of the initial covariance matrix of mid-prices etas
+    chol_H:     (D, D) Cholesky of the covariance matrix of mid-prices etas
+    chol_R:     (D, D) Cholesky factor of the covariance of the ys
+    N:          The number of particles, 
+    dts         The change in time between each observation. dts[0] = 0 
+    """
+    T = ys.shape[0]
+    D = A.shape[0]
+    ts = jnp.cumsum(dts)
+
+    # precompute exact OU transition dynamics and inverse cholesky factors
+    H = chol_H @ chol_H.T
+    Fs, chol_Qs = jax.vmap(lambda dt: ou_diag_transition(A, chol_Q, dt))(dts)
+    inv_chol_Q0 = solve_triangular(chol_Q0, jnp.eye(D), lower=True)
+    inv_chol_H0 = solve_triangular(chol_H0, jnp.eye(D), lower=True)
+
+    if style == "bootstrap":
+
+        def M0_rvs(key, _):
+            eps_z, eps_eta = jr.normal(key, shape=(2, N+1, D))
+            
+            # bootstrap from prior
+            z = eps_z @ chol_Q0.T
+            eta = eps_eta @ chol_H0.T
+            return (z, eta)
+        
+        def Mt_rvs(key, x_t_m_1, params):
+            """
+            Parameters
+            ----------
+            x_t_m_1:  (z_t, eta_t) where
+                        - z_t:   (N, D)
+                        - eta_t: (N, D)
+            """
+            _, _, _, F_t, chol_Q_t, dt = params
+            z_t_m_1, eta_t_m_1 = x_t_m_1
+            eps_z, eps_eta = jr.normal(key, shape=(2, N+1, D))
+
+            # bootstrap from prior
+            z_t = z_t_m_1 @ F_t.T + eps_z @ chol_Q_t.T
+            eta_t = eta_t_m_1 + eps_eta @ (dt * chol_H).T
+            return (z_t, eta_t)
+        
+        def M0_logpdf(x):
+            z, eta = x
+            
+            m0 = jnp.zeros((N+1, D))
+            val = mvn_logpdf(z, m0, None, chol_inv=inv_chol_Q0, constant=False)
+            val += mvn_logpdf(eta, m0, None, chol_inv=inv_chol_H0, constant=False)
+            return val
+
+        def Mt_logpdf(x_t_m_1, x_t, params):
+            _, _, _, F_t, chol_Q_t, dt = params
+            z_t_m_1, eta_t_m_1 = x_t_m_1
+            z_t, eta_t = x_t
+
+            # calculate log half-spread logpdf
+            inv_chol_Q_t = solve_triangular(chol_Q_t, jnp.eye(D), lower=True)
+            val = mvn_logpdf(z_t, z_t_m_1 @ F_t.T, None, chol_inv=inv_chol_Q_t, constant=False)
+
+            # calculate mid-YtB logpdf
+            inv_chol_H = solve_triangular(dt * chol_H, jnp.eye(D), lower=True)
+            val += mvn_logpdf(eta_t, eta_t_m_1, None, chol_inv=inv_chol_H, constant=False)
+
+            return val
+        
+        def Gamma_0(x):
+            i = indices[0]
+            z, eta = x
+            
+            z_i, eta_i = z[..., i], eta[..., i]
+            val = log_potential(i, ys[0], z_i, eta_i, obs_types[0], alpha[i], psi, chol_R)
+            val += M0_logpdf(x)
+
+            return val
+
+        def Gamma_t(x_t_m_1, x_t, params):
+            y_t, obs_type_t, i_t, *_ = params
+            z_t, eta_t = x_t
+
+            z_ti, eta_ti = z_t[..., i_t], eta_t[..., i_t]
+            val = log_potential(i_t, y_t, z_ti, eta_ti, obs_type_t, alpha[i_t], psi, chol_R)
+            val += Mt_logpdf(x_t_m_1, x_t, params)
+            
+            return val
+
+    inps = (ys[1:], obs_types[1:], indices[1:], Fs[1:], chol_Qs[1:], dts[1:]) 
+    M0 = M0_rvs, M0_logpdf
+    Mt = Mt_rvs, Mt_logpdf, inps
+    Gamma_t_plus_params = Gamma_t, inps
+
+    init = lambda x: (x, jnp.zeros((T,), dtype=int))
+    kernel = lambda key, state, *_: csmc.kernel(
+        key, 
+        state[0], 
+        state[1], 
+        M0, 
+        Gamma_0, 
+        Mt, 
+        Gamma_t_plus_params,
+        N=N+1, 
+        **kwargs
+    )
+
+    return kernel, init
+
+def get_rb_csmc_kernel(
         ys: Array,
         indices: Array,
         obs_types: Array,

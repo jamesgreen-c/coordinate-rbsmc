@@ -32,7 +32,7 @@ parser.set_defaults(independent=False)
 parser.add_argument("--log-var", dest="log_var", type=float, default=0)
 parser.add_argument("--phi", dest="phi", type=float, default=0.8)
 
-parser.add_argument("--seed", dest="seed", type=int, default=1234)
+parser.add_argument("--kernel", dest="kernel", type=int, default=KernelType.CSMC)
 parser.add_argument("--style", dest="style", type=str, default="bootstrap")
 
 parser.add_argument("--backward", action='store_true')
@@ -43,12 +43,15 @@ parser.add_argument("--resampling", dest='resampling', type=str, default="multin
 parser.add_argument("--last-step", dest='last_step', type=str, default="barker")
 parser.add_argument("--N", dest="N", type=int, default=31)  # total number of particles is N + 1
 
+parser.add_argument("--seed", dest="seed", type=int, default=1234)
+
 parser.add_argument("--debug", action='store_true')
 parser.add_argument('--no-debug', dest='debug', action='store_false')
 parser.set_defaults(debug=False)
 
 args = parser.parse_args()
-kernel_type = KernelType.CSMC
+
+kernel_type = KernelType(args.kernel)
 
 print(f"""
 ##################################
@@ -120,7 +123,7 @@ def one_experiment(key):
         sparsity_factor=5.0
     )
 
-    csmc_kernel, csmc_init, *_ = get_csmc_kernel(
+    kernel, init, *_ = kernel_type.kernel_maker(
         ys, indices, obs_types, 
         ALPHA, PSI, 
         A, CHOL_Q0, CHOL_Q, CHOL_H0, CHOL_H, CHOL_R,
@@ -131,10 +134,11 @@ def one_experiment(key):
         style=args.style, 
         conditional=False
     )
-    init_state = csmc_init(true_xs)   # no leakage as conditional = False
+    kernel = jax.jit(kernel)
+    init_state = init(true_xs)   # no leakage as conditional = False
 
     def _independent_sample(k_):
-        return csmc_kernel(k_, init_state)
+        return kernel(k_, init_state)
 
     sample_keys = jax.random.split(sample_key, args.M)
     samples, *_ = jax.vmap(_independent_sample)(sample_keys)
