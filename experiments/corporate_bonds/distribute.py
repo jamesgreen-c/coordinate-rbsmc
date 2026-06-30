@@ -47,19 +47,21 @@ args = parser.parse_args()
 # ---------------------------------------------------------------------
 # Sweep controls
 # ---------------------------------------------------------------------
-KERNEL_TYPE = KernelType.CSMC
+KERNEL_TYPES = (KernelType.CSMC, KernelType.RB_CSMC)
+STYLES = ("bootstrap", "bootstrap")
+KERNELS = tuple(zip(KERNEL_TYPES, STYLES, strict=True))
 
 DS = (1, 5, 10, 25, 50, 75, 100)
 BASE_T = args.T
 
 
-def experiment_id(*, D, T, steps):
+def experiment_id(*, kernel, style, D, T, steps):
     return {
+        "kernel": kernel,
+        "style": style,
         "D": int(D),
         "T": int(T),
         "steps": int(steps),
-        "kernel": KERNEL_TYPE,
-        "style": args.style,
     }
 
 
@@ -88,9 +90,10 @@ def results_exist(*, kernel, style, D, T, steps, args) -> bool:
 def build_combinations():
     combinations = []
 
-    for D in DS:
-        steps = 10 * D
-        combinations.append(experiment_id(D=D, T=BASE_T, steps=steps))
+    for kernel, style in KERNELS:
+        for D in DS:
+            steps = 10 * D
+            combinations.append(experiment_id(kernel=kernel, style=style, D=D, T=BASE_T, steps=steps))
 
     return combinations
 
@@ -98,6 +101,7 @@ def build_combinations():
 def build_command(*, combo, args):
     cmd = [
         "python3", "experiment.py",
+        "--kernel", str(combo["kernel"].value),
         "--style", combo["style"],
         "--D", str(combo["D"]),
         "--T", str(combo["T"]),
@@ -131,8 +135,8 @@ print(f"T:                     {BASE_T}")
 print(f"D grid:                {DS}")
 print(f"steps rule:            steps = 10 * D")
 print(f"steps grid:            {[c['steps'] for c in COMBINATIONS]}")
-print(f"kernel:                {KERNEL_TYPE.name}")
-print(f"style:                 {args.style}")
+print(f"kernels:               {[k.name for k in KERNEL_TYPES]}")
+print(f"styles:                {STYLES}")
 print(f"N:                     {args.N}")
 print(f"M:                     {args.M}")
 print(f"K:                     {args.K}")
@@ -170,7 +174,7 @@ for j in indices:
     cmd = build_command(combo=combo, args=args)
     exec_str = shlex.join(cmd)
 
-    print("\nExecuting:", ctext(f"[{j}/{len(COMBINATIONS) - 1}] D={D}, T={T}, steps={steps} :: {exec_str}", "green"))
+    print("\nExecuting:", ctext(f"[{j}/{len(COMBINATIONS) - 1}] kernel={kernel.name}, style={style}, D={D}, T={T}, steps={steps} :: {exec_str}", "green"))
 
     if args.run:
         subprocess.run(cmd, check=True)
