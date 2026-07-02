@@ -75,6 +75,7 @@ class Config:
 
 class Trainer:
 
+    # TODO remove sample cache - there is no need for it here with coordinate rbsmc
     def __init__(
             self,
             posterior_function: Callable,
@@ -165,10 +166,10 @@ class Trainer:
             new_params = {
                 "prior": {
                     "trainable": {
-                        "grad": params["prior"]["trainable"]["grad"],
+                        "grad": new_params["prior"]["trainable"]["grad"],
                         "exact": self.exact_update_fn(params["prior"], aux, data) 
                     },
-                    "fixed": params["prior"]["fixed"],
+                    "fixed": new_params["prior"]["fixed"],
                 },
             }
 
@@ -296,9 +297,7 @@ class Trainer:
         key:  RNG key used by the sample initialiser.
         data: Observation PyTree with leaves of shape (B, T, *_) or (N, T, *_).
         """
-        rec_params = self.params["rec"]
-        factors = tuple(net.apply(p, data) for net, p in zip(self.network, rec_params))
-        return self.sample_init(key=key, params=self.params, factors=factors, data=data)
+        return self.sample_init(key=key, params=self.params["prior"], data=data)
     
     def _calculate_replacement_rate(self, aux: dict):
         """

@@ -13,6 +13,7 @@ def constructor(
         prior,
         smc_init: Callable,
         smc: Callable,
+        dts: Array,
         n_samples: int = 1,
     ):
     """
@@ -122,10 +123,10 @@ def constructor(
             # p_t's
             xp = tree_util.tree_map(lambda z: z[:-1], x_path)
             x = tree_util.tree_map(lambda z: z[1:], x_path)
-            trans_vals = jax.vmap(lambda xp_t, x_t: prior.log_pt(prior_params, xp_t, x_t))(xp, x)
+            trans_vals = jax.vmap(lambda xp_t, x_t, dt_t: prior.log_pt(prior_params, xp_t, x_t, dt_t))(xp, x, dts[1:])
 
             # g_t's
-            obs_vals = jax.vmap(lambda x_t, y_t: prior.log_gt(prior_params, x_t, y_t))(x_path, ys)
+            obs_vals = jax.vmap(lambda x_t, y_t: prior.log_potential(prior_params, x_t, y_t))(x_path, ys)
 
             return val + trans_vals.sum() + obs_vals.sum()
 
@@ -166,7 +167,8 @@ def constructor(
         print(f"Prior logpdf shape: ", val.shape)
         loss = -val.mean(axis=-1).sum()
         
-        aux = {"samples": samples[:, -1], "As": As_p, "next_As": As} # only return last sample per batch idx B for iCSMC methods
+        samples = tree_util.tree_map(lambda s: s[:, -1], samples)   # only return last sample per batch idx B for iCSMC methods
+        aux = {"samples": samples, "As": As_p, "next_As": As}
         return loss, aux 
     
     return posterior, loss
