@@ -15,16 +15,11 @@ def mvn_logpdf(x, m, chol, chol_inv=None, constant=True):
 
     Parameters
     ----------
-    x: Array
-        Point where the density is evaluated.
-    m: Array
-        Mean of the distribution.
-    chol: Array
-        Lower triangular Cholesky factor of the covariance matrix.
-    chol_inv: Array, optional
-        Inverse of the Cholesky factor of the covariance matrix.
-    constant: bool, optional
-        Whether to return the log density with respect to the Lebesgue measure or with respect to the Gaussian measure.
+    x:         Array. Point where the density is evaluated.
+    m:         Array. Mean of the distribution.
+    chol:      Array. Lower triangular Cholesky factor of the covariance matrix.
+    chol_inv:  Array, optional. Inverse of the Cholesky factor of the covariance matrix.
+    constant:  bool, optional. Whether to return the log density with respect to the Lebesgue measure or with respect to the Gaussian measure.
 
     Returns
     -------
@@ -35,12 +30,18 @@ def mvn_logpdf(x, m, chol, chol_inv=None, constant=True):
 
     if chol_inv is not None:
         out = _logpdf_with_inv(x, m, chol_inv)
-    else:
+    elif chol is not None:
         out = _logpdf(x, m, chol)
-    if constant:
+    else:
+        raise ValueError("Either chol or chol_inv must be provided.")
+
+    if not constant:
+        return out
+
+    if chol is not None:
         normalizing_constant = _get_constant(chol)
     else:
-        normalizing_constant = 0.
+        normalizing_constant = _get_constant_from_inv(chol_inv)
 
     return out - normalizing_constant
 
@@ -50,6 +51,12 @@ def _get_constant(chol):
     chol_diag = jnp.diag(chol)
     dim = jnp.sum(jnp.isfinite(chol_diag))
     return tril_log_det(chol) + 0.5 * dim * math.log(2 * math.pi)
+
+@partial(jnp.vectorize, signature="(n,n)->()")
+def _get_constant_from_inv(chol_inv):
+    chol_inv_diag = jnp.diag(chol_inv)
+    dim = jnp.sum(jnp.isfinite(chol_inv_diag))
+    return - tril_log_det(chol_inv)  + 0.5 * dim * math.log(2 * math.pi)
 
 
 def tril_log_det(chol):
