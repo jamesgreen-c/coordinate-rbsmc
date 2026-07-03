@@ -295,7 +295,7 @@ class Trainer:
         Parameters
         ----------
         key:  RNG key used by the sample initialiser.
-        data: Observation PyTree with leaves of shape (B, T, *_) or (N, T, *_).
+        data: Observation PyTree with leaves of shape (N, T, *_).
         """
         return self.sample_init(key=key, params=self.params["prior"], data=data)
     
@@ -348,7 +348,7 @@ class Trainer:
         pbar = tqdm(range(num_iter - 1), desc="Apply")
         for itr in pbar:
             _key = keys[itr]
-            _, samples, *_ = _get_posterior(_key, samples, data)
+            samples, *_ = _get_posterior(_key, samples, data)
             samples = tree_util.tree_map(lambda z: z[:, -1], samples)
 
         return _get_posterior(keys[-1], samples, data)[0]

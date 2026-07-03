@@ -164,7 +164,7 @@ def constructor(
         samples = stop_gradient(samples)
 
         val = prior_logpdf(samples, data, prior_params)
-        print(f"Prior logpdf shape: ", val.shape)
+        # print(f"Prior logpdf shape: ", val.shape)
         loss = -val.mean(axis=-1).sum()
         
         samples = tree_util.tree_map(lambda s: s[:, -1], samples)   # only return last sample per batch idx B for iCSMC methods
