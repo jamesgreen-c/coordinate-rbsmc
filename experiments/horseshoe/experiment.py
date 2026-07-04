@@ -181,7 +181,7 @@ def one_experiment(key):
     trainer.fit(train_data)
 
     # test
-    test_samples = trainer.apply(test_key, test_data[:32], inits=None, num_iter=10)
+    test_samples = trainer.apply(test_key, tree_map(lambda d: d[:32], test_data), inits=None, num_iter=10)
 
     return trainer.loss_hist, trainer.best_params, trainer.params, trainer.replacement_rates, test_xs, test_samples, test_data
 
