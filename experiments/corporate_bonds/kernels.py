@@ -124,7 +124,7 @@ def get_csmc_kernel(
 
             # bootstrap from prior
             z_t = z_t_m_1 @ F_t.T + eps_z @ chol_Q_t.T
-            eta_t = eta_t_m_1 + eps_eta @ (dt * chol_H).T
+            eta_t = eta_t_m_1 + jnp.sqrt(dt) * (eps_eta @ chol_H.T)
             return (z_t, eta_t)
         
         def M0_logpdf(x):
@@ -145,7 +145,7 @@ def get_csmc_kernel(
             val = mvn_logpdf(z_t, z_t_m_1 @ F_t.T, None, chol_inv=inv_chol_Q_t, constant=False)
 
             # calculate mid-YtB logpdf
-            inv_chol_H = solve_triangular(dt * chol_H, jnp.eye(D), lower=True)
+            inv_chol_H = solve_triangular(jnp.sqrt(dt) * chol_H, jnp.eye(D), lower=True)
             val += mvn_logpdf(eta_t, eta_t_m_1, None, chol_inv=inv_chol_H, constant=False)
 
             return val
@@ -310,8 +310,8 @@ def get_rb_csmc_kernel(
             # t=0 half log-spreads logpdf
             z, eta = x
             m0 = jnp.zeros((N+1, D))
-            val = mvn_logpdf(z, m0, None, chol_inv=inv_chol_Q0)
-            val += mvn_logpdf(eta, m0, None, chol_inv=inv_chol_H0)
+            val = mvn_logpdf(z, m0, None, chol_inv=inv_chol_Q0, constant=False)
+            val += mvn_logpdf(eta, m0, None, chol_inv=inv_chol_H0, constant=False)
             return val
 
         def Mt_logpdf(x_t_m_1, P_t_m_1, x_t, params):
