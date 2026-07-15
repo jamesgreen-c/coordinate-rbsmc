@@ -6,6 +6,9 @@ Then run optax updates
 from dataclasses import dataclass, field
 from typing import Callable, Union, Optional, Tuple
 from tqdm import tqdm
+from copy import deepcopy
+
+import numpy as np
 
 import optax
 import jax
@@ -22,15 +25,13 @@ class Config:
     """
     Training configuration for recognition and prior optimisation.
     """
-    batch_size: int = 32
-    num_iter: int = 1000
+    samples: int = 1000
+    burnin: int = 1000
     seed: int = 0
 
     replacement_rate_window: int = 100
 
     debug: bool = False
-    sample_with_replacement: bool = False
-
 
 
 class BayesianInference:
@@ -93,17 +94,18 @@ class BayesianInference:
         new_opt_states:  Updated optimiser-state dictionary.
         """
         key_e, key_m = jr.split(key)
-        loss, aux = self.loss(key_e, params, samples, data)               # E-step
-        new_params = self.prior.update(key_m, params["prior"], aux["samples"])
+        loss, aux = self.loss(key_e, params, samples, data)                      # E-step
+        new_params = self.prior.update(key_m, params["prior"], aux["samples"])   # M-step
         return loss, aux, {"prior": new_params}
 
 
-    def fit(self, data):
+    def fit(self, x0, data):
         """
-        Runs stochastic EM/ECM training.
+        Runs Bayesian Inference.
 
         Parameters
         ----------
+        x0:    The starting point for the MCMC chain. Often an unconditional SMC smoothing sample.
         data:  PyTree of observations with leaves of shape (N, T, *_), where 
                 - N is the number of independent time-series
                 - T is the number of time-steps
@@ -135,32 +137,27 @@ class BayesianInference:
         self.replaced_hist = jnp.zeros((T, self.config.replacement_rate_window)) * jnp.nan
         self.replacement_rates = []
 
-        # batching
-        batch_size = min(N, self.config.batch_size)
-        batch_idx = self.get_batching_function(batch_size, N)
+        # number of MCMC chain steps
+        num_iter = self.config.burnin + self.config.samples
 
-        # sample cache
-        key, cache_key = jr.split(key)
-        sample_cache = self.initialise_sample_cache(cache_key, data)
+        # store history of parameters and samples
+        self.param_hist = deepcopy(self.params)
+        self.sample_hist = tree_util.tree_map(lambda _s: _s[None, ...], x0)  # prepend itr dimension
 
         # run
-        pbar = tqdm(range(self.config.num_iter))
+        pbar = tqdm(range(num_iter))
         for self.itr in pbar:
-            key, batch_key, sample_key = jr.split(key, 3)
-
-            idx = batch_idx(batch_key)
-            batch = tree_util.tree_map(lambda z: z[idx], data)
-            batch_sample_cache = tree_util.tree_map(lambda z: z[idx], sample_cache)
+            key, sample_key = jr.split(key)
 
             loss, aux, self.params = train_step(
                 sample_key,
                 self.params,
-                batch_sample_cache,
-                batch,
+                tree_util.tree_map(lambda _s: _s[-1, ...], self.sample_hist),
+                data,
             )
 
             # track loss
-            loss_float = float(loss) / batch_size
+            loss_float = float(loss)
             self.loss_hist.append(loss_float)
             pbar.set_postfix(loss=f"{loss_float:.3f}")
 
@@ -168,44 +165,16 @@ class BayesianInference:
                 self.best_loss = loss_float
                 self.best_params = self.params
 
-            # update params
-            self.params = {
-                **self.params,
-                "prior": self.stabilise_fn(self.params["prior"])
-            }
-
-            # update sample cache
-            samples = aux["samples"]
-            sample_cache = tree_util.tree_map(lambda cache, new: cache.at[idx].set(new), sample_cache, samples)
+            # update params and append history
+            self.params = {**self.params, "prior": self.stabilise_fn(self.params["prior"])}
+            self.param_hist = self._append_param_hist(self.itr, self.param_hist, self.params)
+            self.sample_hist = self._append_sample_hist(self.sample_hist, aux["samples"])
 
             # track replacement rate
             replacement_rates = self._calculate_replacement_rate(aux)
             self.replacement_rates.append(replacement_rates)
 
-        return self.best_params
-    
-    def get_batching_function(self, batch_size: int, N: int):
-        """
-        Constructs a minibatch index sampler.
-
-        Parameters
-        ----------
-        batch_size: Number of time series per minibatch.
-        N:          Total number of time series.
-
-        Returns
-        -------
-        batch_idx:  Callable mapping an RNG key to minibatch indices.
-        """
-        if batch_size == N:
-            print("Using entire dataset")
-            batch_idx = lambda _: jnp.arange(N)
-        else:
-            if self.config.sample_with_replacement:
-                batch_idx = lambda _k: jr.randint(_k, (batch_size,), 0, N)
-            else:
-                batch_idx = lambda _k: jr.choice(_k, N, shape=(batch_size,), replace=False)
-        return batch_idx
+        return self.param_hist
     
     def initialise_sample_cache(self, key, data):
         """
@@ -234,40 +203,78 @@ class BayesianInference:
         replacement_rates = jnp.nanmean(self.replaced_hist, 1) # (T,)
         return replacement_rates
     
-    def apply(
-            self, 
-            key,
-            data,
-            inits: Array | None,
-            num_iter: int = 1,
-        ):
+    def _append_param_hist(self, itr: int, hist: dict, params: dict):
         """
-        Runs posterior sampling on new data.
+        Appends the current trainable prior parameters along a leading
+        iteration axis while leaving fixed parameters unchanged.
+        """
+        hist_trainable = hist["prior"]["trainable"]
+        trainable = params["prior"]["trainable"]
 
+        # append the latest value to the existing history axis
+        if itr == 0:
+            hist_trainable = tree_util.tree_map(
+                lambda old, new: jnp.stack((old, new), axis=0),
+                hist_trainable,
+                trainable,
+            )
+        else:
+            hist_trainable = tree_util.tree_map(
+                lambda old, new: jnp.concatenate((old, new[None, ...]), axis=0),
+                hist_trainable,
+                trainable,
+            )
+
+        return {**hist, "prior": {**hist["prior"], "trainable": hist_trainable,}}
+    
+    def _append_sample_hist(self, hist, sample):
+        """
+        
         Parameters
         ----------
-        key:       RNG key used for initialisation and posterior sampling.
-        data:      Observation PyTree with leaves of shape (B, T, *_).
-        inits:     Optional initial reference paths. If None, these are initialised from sample_init.
-        num_iter:  Number of posterior sampler calls.
+        hist:    Pytree (itr, T, *D) - current total sample history
+        sample:  Pytree (1, T, *D)   - single sample from SMC with current prior params
 
         Returns
         -------
-        samples:  Posterior samples from the final posterior call.
+        new_hist:  Extended sample history
         """
-        assert num_iter >= 1, "num_iter must be at least 1 for Trainer.apply"
+        return tree_util.tree_map(lambda old, new: jnp.concatenate((old, new), axis=0), hist, sample)
+    
+    # def apply(
+    #         self, 
+    #         key,
+    #         data,
+    #         inits: Array | None,
+    #         num_iter: int = 1,
+    #     ):
+    #     """
+    #     Runs posterior sampling on new data.
 
-        key, init_key = jr.split(key)
-        samples = self.initialise_sample_cache(init_key, data) if inits is None else inits
+    #     Parameters
+    #     ----------
+    #     key:       RNG key used for initialisation and posterior sampling.
+    #     data:      Observation PyTree with leaves of shape (B, T, *_).
+    #     inits:     Optional initial reference paths. If None, these are initialised from sample_init.
+    #     num_iter:  Number of posterior sampler calls.
 
-        _get_posterior = lambda _key, _smpls, _data: self.get_posterior(_key, self.params, _smpls, _data)
-        _get_posterior = jax.jit(_get_posterior)
+    #     Returns
+    #     -------
+    #     samples:  Posterior samples from the final posterior call.
+    #     """
+    #     assert num_iter >= 1, "num_iter must be at least 1 for Trainer.apply"
 
-        keys = jr.split(key, num_iter)
-        pbar = tqdm(range(num_iter - 1), desc="Apply")
-        for itr in pbar:
-            _key = keys[itr]
-            samples, *_ = _get_posterior(_key, samples, data)
-            samples = tree_util.tree_map(lambda z: z[:, -1], samples)
+    #     key, init_key = jr.split(key)
+    #     samples = self.initialise_sample_cache(init_key, data) if inits is None else inits
 
-        return _get_posterior(keys[-1], samples, data)[0]
+    #     _get_posterior = lambda _key, _smpls, _data: self.get_posterior(_key, self.params, _smpls, _data)
+    #     _get_posterior = jax.jit(_get_posterior)
+
+    #     keys = jr.split(key, num_iter)
+    #     pbar = tqdm(range(num_iter - 1), desc="Apply")
+    #     for itr in pbar:
+    #         _key = keys[itr]
+    #         samples, *_ = _get_posterior(_key, samples, data)
+    #         samples = tree_util.tree_map(lambda z: z[:, -1], samples)
+
+    #     return _get_posterior(keys[-1], samples, data)[0]
