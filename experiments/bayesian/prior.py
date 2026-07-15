@@ -466,7 +466,6 @@ def init(
         psi: Array,
         alpha: Array,
         dts: Array,
-        stationary: bool = True
     ):
 
     beta = jnp.zeros((dim, dim))
