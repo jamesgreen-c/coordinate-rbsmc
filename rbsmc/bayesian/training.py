@@ -39,6 +39,7 @@ class BayesianInference:
     def __init__(
             self,
             posterior_function: Callable,
+            initial_posterior_function: Callable,
             loss_function: Callable,
             prior_init: Callable,
             prior,
@@ -59,6 +60,7 @@ class BayesianInference:
         self.loss_hist = None
 
         self.get_posterior = posterior_function
+        self.get_initial_posterior = initial_posterior_function
         self.loss = loss_function
         self.prior_init = prior_init
         self.prior = prior
@@ -99,7 +101,7 @@ class BayesianInference:
         return loss, aux, {"prior": new_params}
 
 
-    def fit(self, x0, data):
+    def fit(self, data):
         """
         Runs Bayesian Inference.
 
@@ -121,14 +123,20 @@ class BayesianInference:
         print(f"Training with N={N}, T={T}")
 
         train_step = jax.jit(self.train_step) if not self.config.debug else self.train_step
-
+        initial_posterior = jax.jit(self.get_initial_posterior) if not self.config.debug else self.get_initial_posterior
+        
         # RNG keys
-        key, prior_init_key = jr.split(jr.PRNGKey(self.config.seed), 2)
+        key, x0_init_key, prior_init_key = jr.split(jr.PRNGKey(self.config.seed), 3)
 
-        # initialisation
+        # parameter initialisation
         _prior_params = self.prior_init(prior_init_key)
         self.params = {"prior": _prior_params}
 
+        # state initialisation
+        dummy_state = self.prior.dummy_init(params=self.params["prior"], data=data)   # (B, T, D)
+        xs0, *_ = initial_posterior(x0_init_key, self.params, dummy_state, data)      # (B, S, T, D)
+        x0 = tree_util.tree_map(lambda _x: _x[:, -1, ...], xs0)                       # (B, T, D)
+        
         # stores
         self.best_params = None
         self.best_loss = float("inf")
@@ -176,16 +184,16 @@ class BayesianInference:
 
         return self.param_hist
     
-    def initialise_sample_cache(self, key, data):
-        """
-        Produces rough initial latent reference paths for a dataset or minibatch.
+    # def initialise_sample_cache(self, key, data):
+    #     """
+    #     Produces rough initial latent reference paths for a dataset or minibatch.
 
-        Parameters
-        ----------
-        key:  RNG key used by the sample initialiser.
-        data: Observation PyTree with leaves of shape (N, T, *_).
-        """
-        return self.prior.sample_init(key=key, params=self.params["prior"], data=data)
+    #     Parameters
+    #     ----------
+    #     key:  RNG key used by the sample initialiser.
+    #     data: Observation PyTree with leaves of shape (N, T, *_).
+    #     """
+    #     return self.prior.sample_init(key=key, params=self.params["prior"], data=data)
     
     def _calculate_replacement_rate(self, aux: dict):
         """
@@ -232,14 +240,14 @@ class BayesianInference:
         
         Parameters
         ----------
-        hist:    Pytree (itr, T, *D) - current total sample history
-        sample:  Pytree (1, T, *D)   - single sample from SMC with current prior params
+        hist:    Pytree (itr, B, T, *D) - current total sample history
+        sample:  Pytree (B, T, *D)      - single sample from SMC with current prior params
 
         Returns
         -------
         new_hist:  Extended sample history
         """
-        return tree_util.tree_map(lambda old, new: jnp.concatenate((old, new), axis=0), hist, sample)
+        return tree_util.tree_map(lambda old, new: jnp.concatenate((old, new[None, ...]), axis=0), hist, sample)
     
     # def apply(
     #         self, 
