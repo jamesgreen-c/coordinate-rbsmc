@@ -36,6 +36,7 @@ from jax.scipy.linalg import solve_triangular
 from rbsmc.utils.math import logdet, mvn_logpdf
 from rbsmc.utils.inverse_gamma import inverse_gamma
 
+
 ################################
 #      helper functions       # 
 ################################
@@ -485,7 +486,7 @@ def init(
     return {"trainable": trainable, "fixed": fixed}
 
 
-def sample_init(key, params, data):
+def dummy_init(params, data):
     params = unpack_params(params)
     chol_Q = params["chol_Q"]
     ys = data[0]
@@ -493,7 +494,6 @@ def sample_init(key, params, data):
     D = chol_Q.shape[-1]
     B, T = ys.shape[:2]
 
-    # Not problematic if burnin >= 1
     return jnp.zeros(shape=(B, T, D)), jnp.zeros(shape=(B, T, D))
 
 

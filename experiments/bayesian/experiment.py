@@ -14,7 +14,7 @@ from rbsmc.expmax.free_energy import constructor as free_energy_constructor
 from rbsmc.bayesian.training import BayesianInference, Config
 
 from experiments.bayesian import prior
-from experiments.bayesian.kernels import KernelType
+from experiments.bayesian.kernels import KernelType, get_csmc_kernel
 
 # ARGS PARSING
 parser = argparse.ArgumentParser()
@@ -70,29 +70,33 @@ def one_experiment(key):
         sparsity_factor=1.0
     )
     true_xs, data, *_ = _get_data(key)
-    true_xs = true_xs                     # xs needs leading dimension for free energy
-    data = data[None, ...]                # data needs leading dimension for free energy
+    data = tree_map(lambda _d: _d[None, ...], data)  # data needs leading dimension for free energy
 
-    # setup smc kernel
-    kernel, kernel_init = kernel_type.kernel_maker(
-        N=args.N,
-        dts=DTs,
-        conditional=args.conditional,
-        resampling_func=killing,
-        backward=args.backward,
-        ancestor_move_func=force_move,
-        style=args.style,
-        sweeps=1
+    # Kernel used for Gibbs iterations
+    kernel_kwargs = dict(
+        N=args.N, dts=DTs, resampling_func=killing, backward=args.backward,
+        ancestor_move_func=force_move, style=args.style, sweeps=1
     )
+    kernel, kernel_init = kernel_type.kernel_maker(conditional=args.conditional, **kernel_kwargs)
+    
+    # loss function used for Gibbs iterations
+    posterior_fn, loss_fn = free_energy_constructor(prior=prior, 
+                                                    smc_init=kernel_init, 
+                                                    smc=kernel, 
+                                                    n_samples=1, 
+                                                    dts=DTs)
 
-    # construct loss function
-    posterior_fn, loss_fn = free_energy_constructor(
-        prior=prior,
-        smc_init=kernel_init,
-        smc=kernel,
-        n_samples=1,
-        dts=DTs
-    )
+    # set unconditional posterior function for x0 initialisation
+    if args.conditional:
+        initial_kernel, initial_kernel_init = kernel_type.kernel_maker(conditional=False, **kernel_kwargs)
+        initial_posterior_fn, _ = free_energy_constructor(prior=prior,
+                                                          smc_init=initial_kernel_init,
+                                                          smc=initial_kernel, 
+                                                          n_samples=1,
+                                                          dts=DTs)
+    else:
+        initial_posterior_fn = posterior_fn
+
 
     # define prior init - only learn A
     prior_init = lambda _: prior.init(
@@ -112,6 +116,7 @@ def one_experiment(key):
     # define and run Bayesian inference
     trainer = BayesianInference(
         posterior_function=posterior_fn,
+        initial_posterior_function=initial_posterior_fn,
         loss_function=loss_fn,
         prior_init=prior_init,
         prior=prior,
