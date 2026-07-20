@@ -7,7 +7,7 @@ from chex import Numeric, Array
 from jax.scipy.linalg import cho_solve
 from jax.tree_util import tree_map
 
-from ..math import mvn_logpdf
+from ..mvn import mvn_logpdf
 
 
 def filtering(ys, m0, P0, Fs, Qs, bs, Hs, Rs, cs) -> Tuple[Array, Array, Numeric]:

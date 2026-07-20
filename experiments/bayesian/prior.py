@@ -26,6 +26,7 @@ from typing import Callable
 import jax
 import jax.numpy as jnp
 import jax.random as jr
+
 from jax.numpy.linalg import inv
 
 from jax.scipy.stats import norm
@@ -33,8 +34,8 @@ from chex import PRNGKey, Array
 
 from jax.scipy.linalg import solve_triangular
 
-from rbsmc.utils.math import logdet, mvn_logpdf
-from rbsmc.utils.inverse_gamma import inverse_gamma
+from rbsmc.utils.mvn import logdet, mvn_logpdf
+from rbsmc.utils.iw import InverseWhishart
 
 
 ################################
@@ -121,47 +122,6 @@ def _construct_cov_cholesky(beta, delta, jitter: float = 1e-6):
     Q = 0.5 * (Q + Q.T)
 
     return jnp.linalg.cholesky(Q + jitter * jnp.eye(dim, dtype=beta.dtype))
-
-
-def sample_horseshoe_chol(
-        key,
-        dim,
-        base_vol: float = 0.10,
-        vol_slope: float = 0.40,
-        tau_scale: float = 0.20,
-        max_tau: float = 0.50,
-        max_lambda: float = 10.0,
-        max_beta: float = 0.50,
-):
-    """
-    Samples a near-sparse eta innovation covariance from a horseshoe-style
-    modified Cholesky parameterisation.
-
-    No Bernoulli mask is used. The horseshoe gives continuous shrinkage:
-    most beta values are small, but some can be meaningfully nonzero.
-    """
-    key_tau, key_lambda, key_beta = jr.split(key, 3)
-
-    lower = jnp.tril(jnp.ones((dim, dim), dtype=bool), -1)
-
-    tau_true = tau_scale * jnp.abs(jr.cauchy(key_tau, ()))
-    tau_true = jnp.clip(tau_true, 1e-3, max_tau)
-
-    llambda_true = jnp.abs(jr.cauchy(key_lambda, (dim, dim)))
-    llambda_true = jnp.clip(llambda_true, 1e-3, max_lambda)
-    llambda_true = jnp.where(lower, llambda_true, 1.0)
-
-    beta_raw = tau_true * llambda_true * jr.normal(key_beta, (dim, dim))
-    beta_true = jnp.where(lower, beta_raw, 0.0)
-    beta_true = jnp.clip(beta_true, -max_beta, max_beta)
-    beta_true = jnp.tril(beta_true, -1)
-
-    vol_eta = base_vol * jnp.linspace(1.0, 1.0 + vol_slope, dim)
-    delta_true = vol_eta**2
-
-    chol_H_true = _construct_cov_cholesky(beta_true, delta_true)
-
-    return chol_H_true, beta_true, delta_true, llambda_true, tau_true
 
 
 ##############################
@@ -319,22 +279,17 @@ def get_prior_params(key, D, T, steps, phi, log_var):
     CHOL_Q0 = 0.1 * jnp.eye(D)
     CHOL_H0 = 0.1 * jnp.eye(D)
     CHOL_Q = 10 ** (log_var / 2) * jnp.eye(D)  # independent spreads
-
-    CHOL_H, BETA, DELTA, LLAMBDA, TAU = sample_horseshoe_chol(
-        key,
-        dim=D,
-        base_vol=0.10,
-        vol_slope=0.40,
-        tau_scale=0.05,
-    )
+    
+    LLAMBDA = jnp.eye(D)
+    H = InverseWhishart.sample(key, D, LLAMBDA)
+    CHOL_H = jnp.linalg.cholesky(H)
 
     CHOL_R = 0.1 * jnp.eye(D)
     PSI = 0.05 * jnp.ones(D)
     ALPHA = 0.10 * jnp.ones(D)
     DTs = jnp.repeat(T / steps, steps)
 
-    return (A, CHOL_Q0, CHOL_H0, CHOL_Q, CHOL_H, 
-            BETA, DELTA, LLAMBDA, TAU, CHOL_R, PSI, ALPHA, DTs)
+    return (A, CHOL_Q0, CHOL_H0, CHOL_Q, CHOL_H, LLAMBDA, CHOL_R, PSI, ALPHA, DTs)
 
 
 #################################
@@ -371,7 +326,7 @@ def log_pt(params, xp, x, dt, constant: bool = True):
     params = unpack_params(params)
     A = params["A"]
     chol_Q = params["chol_Q"]
-    chol_H = _construct_cov_cholesky(params["beta"], params["delta"])
+    chol_H = params["chol_H"]
 
     # calculate exact transition dynamics
     Ft, chol_Qt = ou_diag_transition(A, chol_Q, dt)
@@ -456,9 +411,9 @@ def log_potential(
 #################################################
 
 def init(
-        dim, 
+        key: PRNGKey,
+        dim,
         A: Array,
-        tau: float,
         chol_Q0: Array, 
         chol_H0: Array,
         chol_Q: Array,
@@ -469,17 +424,19 @@ def init(
         dts: Array,
     ):
 
-    beta = jnp.zeros((dim, dim))
-    delta = 0.1 * jnp.ones((dim,))
+    nu = dim  # degrees of freedom
 
-    trainable = {"beta": beta, "delta": delta}
+    H = InverseWhishart.sample(key, nu, llambda)
+    chol_H = jnp.linalg.cholesky(H)
+
+    trainable = {"chol_H": chol_H}
     fixed = {
         "A": A,
         "chol_Q0": chol_Q0, "chol_Q": chol_Q,
         "chol_H0": chol_H0, 
         "chol_R": chol_R,
         "psi": psi, "alpha": alpha, 
-        "lambda": llambda, "tau": tau,
+        "lambda": llambda, "nu": nu,
         "dts": dts
     }
 
@@ -499,33 +456,6 @@ def dummy_init(params, data):
 
 def stabilise_params(params):
     return params
-    # grad = params["trainable"]["grad"]
-
-    # A = grad["A"]
-    # A_diag = jnp.diag(A)
-    # A_diag = jnp.clip(A_diag, 1e-3, 1.0)
-
-    # beta = grad["beta"]
-    # beta = jnp.clip(beta, -0.75, 0.75)
-
-    # log_d = grad["log_d"]
-    # log_d = jnp.clip(log_d, 2 * jnp.log(1e-2), 2 * jnp.log(0.5))
-
-    # grad = {
-    #     **grad,
-    #     "A": jnp.diag(A_diag),
-    #     "beta": beta,
-    #     "log_d": log_d
-    # }
-
-    # return {
-    #     **params,
-    #     "trainable": {
-    #         **params["trainable"],
-    #         "grad": grad,
-    #     },
-    # }
-
 
 #########################################
 #       Parameter update function       #
@@ -537,6 +467,8 @@ def update(key, params, samples):
     """
     Gibbs update for the modified Cholesky parameters of the eta
     innovation covariance.
+
+    B = 1 in experiments
 
     Parameters
     ----------
@@ -550,229 +482,32 @@ def update(key, params, samples):
     -------
     Updated parameter PyTree.
     """
-    key_beta, key_delta = jr.split(key)
+    B, T, D = samples[0].shape
 
     p = unpack_params(params)
     llambda = p["lambda"]
-    tau = p["tau"]
-    beta = p["beta"]
-    delta = p["delta"]
+    nu = p["nu"]
     dts = p["dts"]
 
-    # Bayesian updates
-    F = jnp.eye(samples[1].shape[-1])
-    beta_next, rss, V = _update_beta(key_beta, samples=samples[1], tau=tau, local_scale=llambda, 
-                                     delta=delta, dts=dts, F=F)
-    delta_next = _update_delta(key_delta, samples=samples[1], beta=beta_next, rss=rss, local_var=V)
+    # calculate posterior degrees of freedom
+    a = nu + B * (T - 1)
+    
+    # calculate posterior scale
+    residuals = (samples[:, 1:, :] - samples[:, :-1, :]) / jnp.sqrt(dts[1:, None])  # (B, T-1, D)
+    scatter = jax.vmap(jax.vmap((lambda r: r @ r.T)))(residuals)  # (B, T-1, D, D)
+    scatter = scatter.sum(axis=1)  #  (B, D, D)
+    scatter = scatter.mean(axis=0)  # (D, D)
+    b = llambda + scatter
+
+    # sample new covariance
+    H = InverseWhishart.sample(key, df=a, scale=b)
+    chol_H = jnp.linalg.cholesky(H)
     
     return {
         **params,
         "trainable": {
             **params["trainable"],
-            "beta": beta_next,
-            "delta": delta_next,
+            "chol_H": chol_H,
         },
     }
 
-
-def _update_beta(
-        key: PRNGKey,
-        samples: Array,
-        tau,
-        local_scale,
-        delta,
-        dts: Array,
-        F: Array,
-        jitter: float = 1e-6,
-):
-    B, T, D = samples.shape
-    dtype = samples.dtype
-    tiny = jnp.finfo(dtype).tiny
-
-    lower = jnp.tril(jnp.ones((D, D), dtype=bool), -1)
-
-    residuals = (
-        samples[:, 1:, :] - samples[:, :-1, :]
-    ) / jnp.sqrt(dts[1:, None])
-
-    residuals = residuals.reshape(B * (T - 1), D)
-
-    local_var = jnp.where(
-        lower,
-        tau**2 * jnp.square(local_scale),
-        1.0,
-    )
-    local_var = jnp.maximum(local_var, tiny)
-
-    prior_precision = jnp.where(
-        lower,
-        1.0 / local_var,
-        1.0,
-    )
-
-    gram = residuals.T @ residuals
-    active_outer = lower[:, :, None] & lower[:, None, :]
-
-    # R_d.T R_d / delta_d + V_d^{-1}
-    precision = jnp.where(
-        active_outer,
-        gram[None, :, :] / delta[:, None, None],
-        0.0,
-    )
-
-    precision = precision + (
-        jnp.eye(D, dtype=dtype)[None, :, :]
-        * prior_precision[:, None, :]
-    )
-
-    precision = precision + jitter * jnp.eye(D, dtype=dtype)[None]
-
-    # R_d.T r_d / delta_d
-    rhs = jnp.where(
-        lower,
-        gram.T / delta[:, None],
-        0.0,
-    )
-
-    chol_precision = jnp.linalg.cholesky(precision)
-
-    beta_mean = jnp.linalg.solve(
-        precision,
-        rhs[..., None],
-    )[..., 0]
-
-    standard_normal = jr.normal(
-        key,
-        shape=(D, D),
-        dtype=dtype,
-    )
-
-    posterior_noise = jnp.linalg.solve(
-        jnp.swapaxes(chol_precision, -1, -2),
-        standard_normal[..., None],
-    )[..., 0]
-
-    # No multiplication by sqrt(delta).
-    beta_next = beta_mean + posterior_noise
-    beta_next = jnp.where(lower, beta_next, 0.0)
-
-    fitted = residuals @ beta_next.T
-    regression_error = residuals - fitted
-    rss = jnp.sum(jnp.square(regression_error), axis=0)
-
-    return beta_next, rss, local_var
-
-
-def _update_delta(
-        key: PRNGKey,
-        samples: Array,
-        beta: Array,
-        rss,
-        local_var,
-):
-    B, T, D = samples.shape
-    dtype = samples.dtype
-    tiny = jnp.finfo(dtype).tiny
-
-    n_transitions = B * (T - 1)
-
-    concentration = jnp.full(
-        (D,),
-        0.5 * n_transitions,
-        dtype=dtype,
-    )
-
-    scale = 0.5 * rss
-
-    return inverse_gamma(
-        key,
-        concentration,
-        jnp.maximum(scale, tiny),
-    )
-
-# def _update_beta(
-#         key: PRNGKey,
-#         samples: Array,
-#         tau,
-#         local_scale,
-#         delta,
-#         dts: Array,
-#         F: Array,
-#         jitter: float = 1e-6
-#     ):
-#     """
-#     """
-
-#     B, T, D = samples.shape
-#     dtype = samples.dtype
-#     tiny = jnp.finfo(dtype).tiny
-
-#     # mask for lower triangular
-#     lower = jnp.tril(jnp.ones((D, D), dtype=bool), -1)
-
-#     # calculate residuals  # TODO add F for transition matrix
-#     residuals = (samples[:, 1:, :] - samples[:, :-1, :] ) / jnp.sqrt(dts[1:, None])
-#     residuals = residuals.reshape((B * (T - 1), D))   # flatten over batches
-
-#     # calculate V_d = tau^2 diag(lambda[d, :d]^2)
-#     local_var = jnp.where(lower, tau**2 * jnp.square(local_scale), 1.0)
-#     local_var = jnp.maximum(local_var, tiny)
-
-#     # calculate V_d^{-1}
-#     prior_precision = jnp.where(lower, 1.0 / local_var, 1.0)
-
-#     # calculate R_d.T @ R_t + V_d^{-1}
-#     gram = residuals.T @ residuals
-#     active_outer = lower[:, :, None] & lower[:, None, :]
-#     precision = jnp.where(active_outer, gram[None, :, :], 0.0)
-#     precision = precision + (jnp.eye(D)[None, :, :] * prior_precision[:, None, :])
-#     precision = precision + jitter * jnp.eye(D)[None]  # numerical stabilisation
-
-#     # calculate \hat beta = precision^{-1} @ R_d.T @ r_j
-#     rhs = jnp.where(lower, gram.T, 0.0)
-#     chol_precision = jnp.linalg.cholesky(precision)
-#     beta_mean = jnp.linalg.solve(precision, rhs[..., None])[..., 0]
-
-#     # perform regression
-#     standard_normal = jr.normal(key, shape=(D, D))
-
-#     posterior_noise = jnp.linalg.solve(jnp.swapaxes(chol_precision, -1, -2), standard_normal[..., None])[..., 0]
-#     beta_next = beta_mean + jnp.sqrt(jnp.maximum(delta, tiny))[:, None] * posterior_noise
-#     beta_next = jnp.where(lower, beta_next, 0.0)
-
-#     fitted = residuals @ beta_next.T
-#     regression_error = residuals - fitted
-#     rss = jnp.sum(jnp.square(regression_error), axis=0)
-
-#     return beta_next, rss, local_var
-
-
-# def _update_delta(
-#         key: PRNGKey,
-#         samples: Array,
-#         beta: Array,
-#         rss,
-#         local_var,
-
-#     ):
-
-#     B, T, D = samples.shape
-#     dtype = samples.dtype
-#     tiny = jnp.finfo(dtype).tiny
-
-#     n_transitions = B * (T-1)
-
-#     # mask for lower triangular
-#     lower = jnp.tril(jnp.ones((D, D), dtype=bool), -1)
-
-#     # beta_d.T V_d^{-1} beta_d
-#     prior_quadratic = jnp.sum(jnp.where(lower, jnp.square(beta) / local_var, 0.0), axis=1)
-
-#     # Row d has d active coefficients under zero-based indexing.
-#     n_coefficients = jnp.arange(D, )
-#     concentration = 0.5 * (n_transitions + n_coefficients)
-#     scale = 0.5 * (rss + prior_quadratic)
-#     delta_next = inverse_gamma(key, concentration, jnp.maximum(scale, tiny))
-#     delta_next = jnp.maximum(delta_next, jnp.finfo(delta_next.dtype).tiny)
-
-#     return delta_next

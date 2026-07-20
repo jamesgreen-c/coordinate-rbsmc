@@ -74,10 +74,8 @@ print(f"Loaded results from: {dirpath}")
 
 # load posterior estimates and truth
 param_hist = results["param_hist"].item()
-beta_hist = np.asarray(param_hist["prior"]["trainable"]["beta"])
-delta_hist = np.asarray(param_hist["prior"]["trainable"]["delta"])
-true_beta = results["true_beta"]
-true_delta = results["true_delta"]
+chol_H_hist = np.asarray(param_hist["prior"]["trainable"]["chol_H"])
+true_chol_H = results["true_chol_H"]
 
 sample_hist = results["sample_hist"]
 true_xs = results["xs"]
@@ -89,24 +87,7 @@ true_xs = results["xs"]
 posterior_slice = slice(args.burnin + 1, args.burnin + args.samples + 1)
 
 # evaluate prior parameter inference
-beta_mean = beta_hist[posterior_slice].mean(axis=0)
-delta_mean = delta_hist[posterior_slice].mean(axis=0)
-
-true_chol_H = np.asarray(_construct_cov_cholesky(true_beta, true_delta))
-chol_H_samples = np.stack([
-    np.asarray(_construct_cov_cholesky(beta, delta))
-    for beta, delta in zip(beta_hist[posterior_slice], delta_hist[posterior_slice])
-])
-chol_H_mean = chol_H_samples.mean(axis=0)
-
-print("\nPosterior mean beta:\n", beta_mean)
-print("True beta:\n", true_beta)
-print("Beta absolute error:", np.abs(beta_mean - true_beta).sum())
-
-print("\nPosterior mean delta:\n", delta_mean)
-print("True delta:\n", true_delta)
-print("Delta absolute error:", np.abs(delta_mean - true_delta).sum())
-
+chol_H_mean = chol_H_hist[posterior_slice].mean(axis=0)
 print("\nPosterior mean chol_H:\n", chol_H_mean)
 print("True chol_H:\n", true_chol_H)
 print("chol_H absolute error:", np.abs(chol_H_mean - true_chol_H).sum())
@@ -124,7 +105,7 @@ plt.savefig(f"{plotpath}/loss_history.png", dpi=200, bbox_inches="tight")
 plt.close()
 
 
-# beta traces
+# chol_H traces
 fig, axes = plt.subplots(args.D, args.D, figsize=(3 * args.D, 2.5 * args.D), squeeze=False)
 
 for j in range(args.D):
@@ -135,28 +116,13 @@ for j in range(args.D):
             ax.axis("off")
             continue
 
-        ax.plot(beta_hist[:, j, k])
-        ax.axhline(true_beta[j, k], linestyle=":", color="red")
+        ax.plot(chol_H_hist[:, j, k])
+        ax.axhline(true_chol_H[j, k], linestyle=":", color="red")
         ax.axvline(args.burnin, linestyle="--", color="black")
-        ax.set_title(f"beta[{j},{k}]")
+        ax.set_title(f"cho_H[{j},{k}]")
 
 plt.tight_layout()
-plt.savefig(f"{plotpath}/beta_traces.png", dpi=200, bbox_inches="tight")
-plt.close()
-
-
-# delta traces
-fig, axes = plt.subplots(args.D, 1, figsize=(8, 2.5 * args.D), squeeze=False)
-
-for d in range(args.D):
-    ax = axes[d, 0]
-    ax.plot(delta_hist[:, d])
-    ax.axhline(true_delta[d], linestyle=":", color="red")
-    ax.axvline(args.burnin, linestyle="--", color="black")
-    ax.set_title(f"delta[{d}]")
-
-plt.tight_layout()
-plt.savefig(f"{plotpath}/delta_traces.png", dpi=200, bbox_inches="tight")
+plt.savefig(f"{plotpath}/chol_H_traces.png", dpi=200, bbox_inches="tight")
 plt.close()
 
 

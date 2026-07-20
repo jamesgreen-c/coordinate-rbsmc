@@ -8,7 +8,7 @@ from jax.scipy.linalg import solve_triangular
 
 import rbsmc.csmc as csmc
 import rbsmc.rb_csmc as rb_csmc
-from rbsmc.utils.math import mvn_logpdf
+from rbsmc.utils.mvn import mvn_logpdf
 
 from experiments.bayesian.prior import (log_p0, log_pt, log_potential, 
                                      unpack_params, ou_diag_transition,
@@ -81,7 +81,8 @@ def get_csmc_kernel(N, dts, conditional: bool = False, sweeps: int = 1, **kwargs
         chol_Q0 = _params["chol_Q0"]
         chol_H0 = _params["chol_H0"]
         chol_Q = _params["chol_Q"]
-        chol_H = _construct_cov_cholesky(_params["beta"], _params["delta"])
+        chol_H = _params["chol_H"]
+        # chol_H = _construct_cov_cholesky(_params["beta"], _params["delta"])
 
         # get path shape
         D = chol_Q.shape[-1]
@@ -196,7 +197,8 @@ def get_rb_csmc_kernel(N, dts, conditional: bool = False, sweeps: int = 1, **kwa
         chol_Q0 = _params["chol_Q0"]
         chol_H0 = _params["chol_H0"]
         chol_Q = _params["chol_Q"]
-        chol_H = _construct_cov_cholesky(_params["beta"], _params["delta"])
+        chol_H = _params["chol_H"]
+        # chol_H = _construct_cov_cholesky(_params["beta"], _params["delta"])
 
         # get path shape
         D = chol_Q.shape[-1]
