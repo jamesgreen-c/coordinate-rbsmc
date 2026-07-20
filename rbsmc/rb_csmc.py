@@ -62,7 +62,7 @@ def kernel(
         indices, 
         M_0, G_0, 
         M_t, G_t,
-        resampling_func, N, conditional
+        resampling_func, N, conditional=conditional
     )
 
     #################################
@@ -130,8 +130,10 @@ def forward_pass(
     #        Initialisation         #
     #################################
     u_0, mu_pred_0, P_pred_0 = M_0_rvs(key_init, N)
-    # if conditional:
-    #     u0 = tree_map(lambda x0_, xs0_: x0_.at[b_star[0]].set(xs0_), u0, tree_map(lambda x: x[0], x_star))  # TODO fix this ie set at bond idx
+
+    # fix observed reference coordinate before weighting
+    if conditional:
+        u_0 = tree_map(lambda u0_, xs_0_: u0_.at[b_star[0]].set(xs_0_[..., indices[0]]), u_0, tree_map(lambda x: x[0], x_star))
 
     # Compute initial weights and normalize
     log_w0 = G_0(u_0)
@@ -141,6 +143,10 @@ def forward_pass(
     # exact marginalisation
     x0 = tree_map(lambda u, mu, P: _marginalise_means(indices[0], u, mu, P), u_0, mu_pred_0, P_pred_0)
     P0 = tree_map(lambda P: _marginalise_covs(indices[0], P), P_pred_0)
+
+    # fix all reference coordinates
+    # if conditional:
+    #     x0 = tree_map(lambda x0_, xs0_: x0_.at[b_star[0]].set(xs0_), x0, tree_map(lambda x: x[0], x_star))
 
     #################################
     #        Forward pass           #
@@ -158,8 +164,9 @@ def forward_pass(
         # Sample proposal index
         u_t, mu_pred_t, P_pred_t = M_t_rvs(key_proposal_t, x_t_m_1, P_t_m_1, M_t_params)
 
-        # if conditional:
-        #     x_t = tree_map(lambda xt_, xs_t_: xt_.at[b_star_t].set(xs_t_), x_t, x_star_t)
+        # fix observed reference coordinate before weighting
+        if conditional:
+            u_t = tree_map(lambda ut_, xs_t_: ut_.at[b_star_t].set(xs_t_[..., idx_t]), u_t, x_star_t)
 
         log_w_t = G_t(x_t_m_1, u_t, G_params_t)
         log_w_t = normalize(log_w_t, log_space=True)
@@ -168,6 +175,10 @@ def forward_pass(
         # exact marginalisation
         x_t = tree_map(lambda u, mu, P: _marginalise_means(idx_t, u, mu, P), u_t, mu_pred_t, P_pred_t)
         P_t = tree_map(lambda P: _marginalise_covs(idx_t, P), P_pred_t)
+
+        # fix all reference coordinates
+        # if conditional:
+        #     x_t = tree_map(lambda xt_, xs_t_: xt_.at[b_star_t].set(xs_t_), x_t, x_star_t)
 
         # Return next step
         next_carry = w_t, x_t, P_t
@@ -368,6 +379,23 @@ def _marginalise_means(i: Array, u: Array, mu_pred: Array, P_pred: Array):
     return mu_pred + (u - m)[:, None] * G[None, :]
 
 
+# def _marginalise_covs(i: Array, P_pred: Array):
+#     """
+#     Condition full predictive covariance on sampled coordinate x[i].
+
+#     Parameters
+#     ----------
+#     i:       Observed coordinate index.
+#     P_pred:  (D, D) predictive covariance.
+
+#     Returns
+#     -------
+#     P:       (D, D) conditional covariance.
+#     """
+#     G = P_pred[:, i] / P_pred[i, i]
+#     P = P_pred - jnp.outer(G, P_pred[i, :])
+#     return 0.5 * (P + P.T)
+
 def _marginalise_covs(i: Array, P_pred: Array):
     """
     Condition full predictive covariance on sampled coordinate x[i].
@@ -381,9 +409,15 @@ def _marginalise_covs(i: Array, P_pred: Array):
     -------
     P:       (D, D) conditional covariance.
     """
-    G = P_pred[:, i] / P_pred[i, i]
-    P = P_pred - jnp.outer(G, P_pred[i, :])
+    variance = jnp.maximum(P_pred[i, i], 1e-8)
+    column = P_pred[:, i]
+
+    P = P_pred - jnp.outer(column, column) / variance
+    P = P.at[i, :].set(0.0)
+    P = P.at[:, i].set(0.0)
+    
     return 0.5 * (P + P.T)
+
 
 def _split_key_like(key, tree):
     leaves = tree_leaves(tree)
