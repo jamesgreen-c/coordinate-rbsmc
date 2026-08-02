@@ -31,13 +31,13 @@ import jax.random as jr
 from jax import Array
 from jax.random import PRNGKey
 
-from deprecated.dists import NatParam
-from deprecated.smc import SMC, SMCPosterior
+from rbsmc.bayesian.dists import NatParam
 
 
 @dataclass(frozen=True)
 class GibbsContext:
     trajectory: Array
+    dts: Array
     data: Any
     params: dict[str, Any]
 
@@ -74,7 +74,11 @@ class ConjugateBlock(GibbsBlock):
 @dataclass(frozen=True)
 class ConditionalBlock(GibbsBlock):
     names: tuple[str, ...]
+    prior: Callable[[Array, dict[str | Any]], dict[str, Any]]
     kernel: Callable[[Array, GibbsContext], dict[str, Any]]
+
+    def init(self, key: PRNGKey, hyperparams):
+        return self.prior(key, hyperparams)
 
     def sample(self, key: PRNGKey, context: GibbsContext) -> dict[str, Any]:
         return self.kernel(key, context)
@@ -101,13 +105,13 @@ class Gibbs:
             params = {**params, **_block.init(_key, params)}
         return params
 
-    def update(self, key, params, trajectory, data):
+    def update(self, key, params, trajectory, dts, data):
         """ Run a set of sequential gibbs samples """
         keys = jr.split(key, len(self.blocks))
 
         new_params = params
         for _key, _block in zip(keys, self.blocks):
-            context = GibbsContext(trajectory=trajectory, data=data, params=new_params)
+            context = GibbsContext(trajectory=trajectory, dts=dts, data=data, params=new_params)
             new_params = {**new_params, **_block.sample(_key, context)}
         return new_params
     
