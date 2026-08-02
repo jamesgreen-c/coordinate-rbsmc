@@ -5,49 +5,45 @@ from jax.random import PRNGKey
 
 class FeynmanKac(ABC):
 
-    def __init__(self, params):
-        self.params = params
-
-    def update(self, params):
-        # TODO: for jax.jit does this need to return a new FK instance?
-        self.params = {**self.params, **params}    
+    def __init__(self):
+        pass
 
     @abstractmethod
-    def M0_rvs(self, key: PRNGKey, inps: tuple):
+    def M0_rvs(self, params, key: PRNGKey, inp: tuple):
         """ Implement t=0 proposal kernel for SMC """
         pass
 
     @abstractmethod
-    def Mt_rvs(self, key: PRNGKey, xp, inps: tuple):
+    def Mt_rvs(self, params, key: PRNGKey, xp, inp: tuple):
         """ Implement Markov proposal kernel for SMC """
         pass
 
     @abstractmethod
-    def M0_logpdf(self, x0, inps: tuple):
+    def M0_logpdf(self, params, x0, inp: tuple):
         """ Implement logpdf for t=0 proposal kernel """
         pass
 
     @abstractmethod
-    def Mt_logdf(self, xp, x, inps: tuple): 
+    def Mt_logpdf(self, params, xp, x, inp: tuple): 
         """ Implement logpdf for Markov proposal kernel """
 
     @abstractmethod
-    def G0_logpdf(self, x0, inps: tuple):
+    def G0_logpdf(self, params, x0, inp: tuple):
         pass 
 
     @abstractmethod
-    def Gt_logpdf(self, x, inps: tuple):
+    def Gt_logpdf(self, params, x, inp: tuple):
         """ Implement logpdf for potential function """
         pass
 
-    def Gamma_0(self, x0, inps):
-        return self.G0_logpdf(x0, inps) + self.M0_logpdf(x0, inps)
+    def Gamma_0(self, params, x0, inp):
+        return self.G0_logpdf(params, x0, inp) + self.M0_logpdf(params, x0, inp)
 
-    def Gamma_t(self, xp, x, inps):
-        return self.Gt_logpdf(x, inps) + self.Mt_logdf(xp, x, inps)
+    def Gamma_t(self, params, xp, x, inp):
+        return self.Gt_logpdf(params, x, inp) + self.Mt_logpdf(params, xp, x, inp)
 
     @abstractmethod
-    def init(self, key: PRNGKey, data: tuple[Array], **kwargs):
+    def init(self, key: PRNGKey, params: dict, data: tuple[Array], **kwargs):
         """ 
         Write a function to get first state for SMC. 
         Usually unconditional run 
@@ -55,7 +51,7 @@ class FeynmanKac(ABC):
         pass
 
     @abstractmethod
-    def get_kernel(self, state, data, conditional: bool, **kwargs):
+    def get_kernel(self, params, state, data, conditional: bool, **kwargs):
         """ Write a kernel constructor using defined FK methods """
         pass
 
@@ -68,8 +64,7 @@ class SMC(ABC):
         self.kwargs = kwargs
 
     def init(self, key: PRNGKey, params: dict, data: tuple[Array]):
-        self.fk.update(params)
-        return self.fk.init(key, data, **self.kwargs)
+        return self.fk.init(key, params, data, **self.kwargs)
 
     def sample(
             self, 
@@ -78,11 +73,10 @@ class SMC(ABC):
             state: tuple[Array],
             data: tuple[Array],
         ):
-        # update model parameters
-        self.fk.update(params)
 
         # construct new kernel with params
         kernel = self.fk.get_kernel(
+            params,
             state, 
             data, 
             conditional=self.conditional, 
