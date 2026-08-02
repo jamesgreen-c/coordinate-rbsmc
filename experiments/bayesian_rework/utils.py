@@ -5,12 +5,7 @@ from jax import Array
 #       helper functions       # 
 ################################
 
-def unpack_params(params):
-    trainable = params.get("trainable", {})
-    fixed = params.get("fixed", {})
-    return {**fixed, **trainable}
-
-def ou_diag_transition(A, chol_Q, dt):
+def ou_diag_transition(A, Q, dt):
     """
     Exact OU transition for dz = -diag(A_diag) z dt + chol_Q dB_t.
 
@@ -24,7 +19,6 @@ def ou_diag_transition(A, chol_Q, dt):
     F:   (D, D) transition matrix
     Cov: (D, D) transition covariance
     """
-    Q = chol_Q @ chol_Q.T
 
     A_diag = jnp.diag(A)
     a_sum = A_diag[:, None] + A_diag[None, :]

@@ -9,10 +9,7 @@ from jax.scipy.stats import norm
 
 from rbsmc.utils.mvn import mvn_logpdf
 
-from bayesian_rework.utils import (ou_diag_transition, 
-                                   unpack_params, 
-                                   _diag_or_vector_at, 
-                                   _logdiffexp)
+from experiments.bayesian_rework.utils import ou_diag_transition, _diag_or_vector_at, _logdiffexp
 
 
 ####################################
@@ -25,9 +22,10 @@ def log_p0(params: dict, x0, constant: bool = True):
     dim = z0.shape[-1]
 
     # extract params
-    params = unpack_params(params)
-    chol_Q0 = params["chol_Q0"]
-    chol_H0 = params["chol_H0"]
+    Q0 = params["Q0"]
+    H0 = params["H0"]
+    chol_Q0 = jnp.linalg.cholesky(Q0)
+    chol_H0 = jnp.linalg.cholesky(H0)
 
     # compute inverse cholesky factors
     inv_chol_Q0 = solve_triangular(chol_Q0, jnp.eye(dim), lower=True)
@@ -48,14 +46,13 @@ def log_pt(params: dict, xp, x, dt, constant: bool = True):
     dim = z.shape[-1]
 
     # extract params
-    params = unpack_params(params)
     A = params["A"]
-    chol_Q = params["chol_Q"]
-    chol_H = params["chol_H"]
+    Q = params["Q"]
+    H = params["H"]
 
     # calculate exact transition dynamics
-    Ft, chol_Qt = ou_diag_transition(A, chol_Q, dt)
-    chol_Ht = jnp.sqrt(dt) * chol_H
+    Ft, chol_Qt = ou_diag_transition(A, Q, dt)
+    chol_Ht = jnp.sqrt(dt) * jnp.linalg.cholesky(H)
 
     # compute inverse cholesky factors
     inv_chol_Qt = solve_triangular(chol_Qt, jnp.eye(dim), lower=True)
@@ -93,10 +90,10 @@ def log_ht(params, x, data: tuple[Array]):
     zs, etas = x
 
     # extract params
-    params = unpack_params(params)
     alpha = params["alpha"]
     psi = params["psi"]
-    chol_R = params["chol_R"]
+    R = params["R"]
+    chol_R = jnp.linalg.cholesky(R)
 
     # extract relevant bond dimd
     z_i = zs[..., i]

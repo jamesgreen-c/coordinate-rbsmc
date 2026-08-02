@@ -6,8 +6,9 @@ import jax.random as jr
 
 from jax import Array
 from jax.random import PRNGKey
+from jax.tree_util import tree_map
 
-from bayesian_rework.utils import (ou_diag_transition, _diag_or_vector_at)
+from experiments.bayesian_rework.utils import (ou_diag_transition, _diag_or_vector_at)
 
 from rbsmc.utils.iw import InverseWhishart
 
@@ -82,11 +83,11 @@ def get_data(
         dts: Array,
         A: Array,
         psi: Array,
-        chol_Q0: Array,
-        chol_Q: Array,
-        chol_H0: Array,
-        chol_H: Array,
-        chol_R: Array,
+        Q0: Array,
+        Q: Array,
+        H0: Array,
+        H: Array,
+        R: Array,
         alpha: Array,
         sparsity_factor: float = 1.0,
         **kwargs
@@ -98,14 +99,14 @@ def get_data(
     ----------
     key:             PRNGKey
     dim:             Number of bonds
-    dts:             (K,) Time increments
+    dts:             (K-1,) Time increments
     A:               (dim, dim) Discrete-time transition matrix for z
     psi:             (dim,) Baseline half-spread scale
-    chol_Q0:         (dim, dim) Initial Cholesky factor for z_0
-    chol_Q:          (dim, dim) Transition Cholesky factor for z
-    chol_H0:         (dim, dim) Initial Cholesky factor for eta_0
-    chol_H:          (dim, dim) Transition Cholesky factor for eta
-    chol_R:          (dim,) or (dim, dim) Observation noise standard deviations
+    Q0:              (dim, dim) Initial covariance for z_0
+    Q:               (dim, dim) Transition covariance for z
+    H0:              (dim, dim) Initial covariance for eta_0
+    H:               (dim, dim) Transition covariance for eta
+    R:               (dim,) or (dim, dim) Observation noise standard deviations
     alpha:           (dim,) D2D interval half-widths
     sparsity_factor: Observation frequency ratio between non-final bonds and final bond.
 
@@ -118,26 +119,36 @@ def get_data(
     obs:  Tuple (bond_idxs, event_types, alphas, obs_values)
     """
 
+    K = dts.shape[0] + 1
     init_key, event_key, sampling_key = jr.split(key, 3)
-    K = dts.shape[0]
-
     init_key_z, init_key_eta = jr.split(init_key)
-
-    z0 = chol_Q0 @ jr.normal(init_key_z, (dim,))
-    eta0 = chol_H0 @ jr.normal(init_key_eta, (dim,))
-
     key_bond, key_type, key_y = jr.split(event_key, 3)
 
+    # precompute cholesky's
+    chol_Q0 = jnp.linalg.cholesky(Q0)
+    chol_H0 = jnp.linalg.cholesky(H0)
+    chol_Q = jnp.linalg.cholesky(Q)
+    chol_H = jnp.linalg.cholesky(H)
+    chol_R = jnp.linalg.cholesky(R)
+
+    # presample observation quantities
     bond_weights = jnp.ones((dim,))
     bond_weights = bond_weights.at[:-1].set(sparsity_factor)
     bond_probs = bond_weights / jnp.sum(bond_weights)
     bond_idxs = jr.categorical(key_bond, jnp.log(bond_probs), shape=(K,)).astype(jnp.int32)
-
     event_types = jr.randint(key_type, (K,), minval=0, maxval=5)
+
     keys_y = jr.split(key_y, K)
 
-    Fs, chol_Bs = jax.vmap(lambda dt: ou_diag_transition(A, chol_Q, dt))(dts)
-    eps_zs, eps_etas = jr.normal(sampling_key, (2, K, dim))
+    # t=0 data
+    z0 = chol_Q0 @ jr.normal(init_key_z, (dim,))
+    eta0 = chol_H0 @ jr.normal(init_key_eta, (dim,))
+    obs_val0 = emission(keys_y[0], z0, eta0, psi, chol_R, alpha, bond_idxs[0], event_types[0])
+    obs0 = (obs_val0, bond_idxs[0], event_types[0])
+
+    # t=1,...,T data
+    Fs, chol_Bs = jax.vmap(lambda dt: ou_diag_transition(A, Q, dt))(dts)
+    eps_zs, eps_etas = jr.normal(sampling_key, (2, K-1, dim))
 
     def body(carry, inps):
         z_k, eta_k = carry
@@ -150,13 +161,16 @@ def get_data(
 
         # sample observation
         obs_value = emission(key_y_k, z_kp1, eta_kp1, psi, chol_R, alpha, bond_idx, event_type)
-        obs_k = (obs_value, bond_idx, event_type)
+        obs_kp1 = (obs_value, bond_idx, event_type)
 
-        return x_kp1, (x_kp1, obs_k)
+        return x_kp1, (x_kp1, obs_kp1)
 
-    carry0 = (z0, eta0)
-    inps = (dts, Fs, chol_Bs, eps_zs, eps_etas, keys_y, bond_idxs, event_types)
-    _, (xs, obs) = jax.lax.scan(body, carry0, inps)
+    x0 = (z0, eta0)
+    inps = (dts, Fs, chol_Bs, eps_zs, eps_etas, keys_y[1:], bond_idxs[1:], event_types[1:])
+    _, (xs, obs) = jax.lax.scan(body, x0, inps)
+
+    xs = tree_map(lambda _x0, _x: jnp.concatenate((_x0[None], _x), axis=0), x0, xs)
+    obs = tree_map(lambda _y0, _y: jnp.concatenate((_y0[None], _y), axis=0), obs0, obs)
     return xs, obs
 
 
@@ -164,29 +178,27 @@ def get_prior_params(key, D, T, steps, phi, log_var):
     
     # --- dynamics config ---
     A = phi * jnp.eye(D)
-    CHOL_Q0 = 0.1 * jnp.eye(D)
-    CHOL_H0 = 0.1 * jnp.eye(D)
-    CHOL_Q = 10 ** (log_var / 2) * jnp.eye(D)  # independent spreads
+    Q0 = 0.1 * jnp.eye(D)
+    H0 = 0.1 * jnp.eye(D)
+    Q = 10**log_var * jnp.eye(D)  # independent spreads
     
     LLAMBDA = jnp.eye(D)
     H = InverseWhishart.sample(key, D, LLAMBDA)
-    CHOL_H = jnp.linalg.cholesky(H)
 
-    CHOL_R = 0.1 * jnp.eye(D)
+    R = 0.1 * jnp.eye(D)
     PSI = 0.05 * jnp.ones(D)
     ALPHA = 0.10 * jnp.ones(D)
     DTs = jnp.repeat(T / steps, steps)
 
     params = {
         "A": A,
-        "CHOL_Q0": CHOL_Q0,
-        "CHOL_H0": CHOL_H0,
-        "CHOL_Q":  CHOL_Q,
-        "LLAMBDA": LLAMBDA,
+        "Q0": Q0,
+        "H0": H0,
+        "Q":  Q,
         "H": H,
-        "CHOL_H": CHOL_H,
-        "CHOL_R": CHOL_R,
-        "PSI": PSI,
-        "ALPHA": ALPHA,
+        "R": R,
+        "llambda": LLAMBDA,
+        "psi": PSI,
+        "alpha": ALPHA,
     }
     return params, DTs
