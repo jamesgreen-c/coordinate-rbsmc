@@ -18,6 +18,8 @@ from jax import tree_util
 import jax.random as jr
 import jax.numpy as jnp
 
+from rbsmc.bayesian.smc import SMC
+from rbsmc.bayesian.gibbs import Gibbs
 
 
 @dataclass
@@ -33,18 +35,13 @@ class Config:
 
     debug: bool = False
 
-
-class BayesianInference:
+class ParticleGibbs:
 
     def __init__(
             self,
-            posterior_function: Callable,
-            initial_posterior_function: Callable,
-            loss_function: Callable,
-            prior_init: Callable,
-            prior,
+            smc: SMC,
+            gibbs: Gibbs,
             config: Config,
-            stabilise_function: Callable | None = None,
         ):
         """
         Parameters
@@ -57,24 +54,16 @@ class BayesianInference:
         stabilise_function:     Optional callable applied to the full prior parameter dictionary after each update.
         """
 
-        self.loss_hist = None
-
-        self.get_posterior = posterior_function
-        self.get_initial_posterior = initial_posterior_function
-        self.loss = loss_function
-        self.prior_init = prior_init
-        self.prior = prior
+        self.smc = smc
+        self.gibbs = gibbs
         self.config = config
-
-        self.stabilise_fn = stabilise_function if stabilise_function is not None else lambda _params: _params
-
-        self._train_data_ndim = None
 
     def train_step(
             self,
             key,
             params,
-            samples: Array,
+            state: Array,
+            dts: Array,
             data: Union[Array, Tuple[Array]],
         ):
         """
@@ -82,207 +71,230 @@ class BayesianInference:
 
         Parameters
         ----------
-        key:         PRNG key used by the stochastic free-energy estimator.
-        params:      Dictionary with fields:
-                        - "prior": prior parameters with trainable grad/exact blocks and fixed parameters.
-        samples:     Cached reference paths for the current minibatch.
-        data:        Mini-batch of observations.
+        key:      RNG.
+        params:   Dictionary containing parameters for prior model.
+        samples:  Cached reference path.
+        data:     Observations.
 
         Returns
         -------
-        loss:            Scalar stochastic negative free-energy estimate.
-        aux:             Auxiliary dictionary containing cached samples, SMC ancestor indices, and optional sufficient statistics.
-        new_params:      Updated parameter dictionary after the Optax update and optional exact update.
-        new_opt_states:  Updated optimiser-state dictionary.
         """
         key_e, key_m = jr.split(key)
-        loss, aux = self.loss(key_e, params, samples, data)                      # E-step
-        new_params = self.prior.update(key_m, params["prior"], aux["samples"])   # M-step
-        return loss, aux, {"prior": new_params}
+
+        # E step
+        state, aux = self.smc.sample(key_e, params, state, data)
+        energy = 0 # how and where to put energy calculation 
+
+        # M step
+        new_params = self.gibbs.update(key_m, params, state[0], dts, data)
+        return energy, new_params, state, aux
 
 
-    def fit(self, data):
+    def run(self, data, dts: Array, hyperparams: dict):
         """
         Runs Bayesian Inference.
 
         Parameters
         ----------
-        x0:    The starting point for the MCMC chain. Often an unconditional SMC smoothing sample.
-        data:  PyTree of observations with leaves of shape (N, T, *_), where 
-                - N is the number of independent time-series
-                - T is the number of time-steps
-
-        Returns
-        -------
-        best_params: Parameter dictionary achieving the lowest observed stochastic loss.
+        data:         PyTree of observations with leaves of shape (T, *D), where 
+                          - T is the number of time-steps
+                          - *D is the arbitrary observation dimension
+        dts:          The set of time-differentials between each observation time
+        hyperparams:  Fixed / initial parameters required for prior initialisation
         """
-       
         data_leaf = tree_util.tree_leaves(data)[0]
-        N, T = data_leaf.shape[:2]
-        self._train_data_ndim = data_leaf.ndim
-        print(f"Training with N={N}, T={T}")
+        T = data_leaf.shape[0]
 
         train_step = jax.jit(self.train_step) if not self.config.debug else self.train_step
-        initial_posterior = jax.jit(self.get_initial_posterior) if not self.config.debug else self.get_initial_posterior
         
-        # RNG keys
-        key, x0_init_key, prior_init_key = jr.split(jr.PRNGKey(self.config.seed), 3)
+        # initialisation
+        key, sample_key, param_key = jr.split(jr.PRNGKey(self.config.seed), 3)
+        self.params = self.gibbs.init(param_key, hyperparams)
+        state = self.smc.init(sample_key, self.params, data)
 
-        # parameter initialisation
-        _prior_params = self.prior_init(prior_init_key)
-        self.params = {"prior": _prior_params}
-
-        # state initialisation
-        dummy_state = self.prior.dummy_init(params=self.params["prior"], data=data)   # (B, T, D)
-        xs0, *_ = initial_posterior(x0_init_key, self.params, dummy_state, data)      # (B, S, T, D)
-        x0 = tree_util.tree_map(lambda _x: _x[:, -1, ...], xs0)                       # (B, T, D)
-        
-        # stores
-        self.best_params = None
-        self.best_loss = float("inf")
-        self.loss_hist = []
-
-        self.replaced_hist = jnp.zeros((T, self.config.replacement_rate_window)) * jnp.nan
-        self.replacement_rates = []
-
-        # number of MCMC chain steps
-        num_iter = self.config.burnin + self.config.samples
-
-        # store history of parameters and samples
-        self.param_hist = deepcopy(self.params)
-        self.sample_hist = tree_util.tree_map(lambda _s: _s[None, ...], x0)  # prepend itr dimension
+        # memory efficient stores
+        self.energies = np.empty(self.config.burnin + self.config.samples, dtype=np.float32)
+        self._allocate_hist(state, self.params, T)
 
         # run
-        pbar = tqdm(range(num_iter))
-        for self.itr in pbar:
-            key, sample_key = jr.split(key)
+        pbar = tqdm(range(self.config.burnin + self.config.samples))
+        for itr in pbar:
+            key, subkey = jr.split(key)
 
-            loss, aux, self.params = train_step(
-                sample_key,
-                self.params,
-                tree_util.tree_map(lambda _s: _s[-1, ...], self.sample_hist),
-                data,
-            )
+            energy, self.params, state, aux = train_step(subkey, self.params, state, dts, data)
 
-            # track loss
-            loss_float = float(loss)
-            self.loss_hist.append(loss_float)
-            pbar.set_postfix(loss=f"{loss_float:.3f}")
+            # track energy
+            energy_float = float(energy)
+            self.energies[itr] = energy_float
+            pbar.set_postfix(loss=f"{energy_float:.3f}")
 
-            if loss_float < self.best_loss:
-                self.best_loss = loss_float
-                self.best_params = self.params
+            replacement_rates = self._calculate_replacement_rate(aux["replaced"])
+            self._store_iteration(itr, state, self.params, replacement_rates)
 
-            # update params and append history
-            self.params = {**self.params, "prior": self.stabilise_fn(self.params["prior"])}
-            self.param_hist = self._append_param_hist(self.itr, self.param_hist, self.params)
-            self.sample_hist = self._append_sample_hist(self.sample_hist, aux["samples"])
+        return self.sample_hist, self.ancestor_hist, self.param_hist, self.replacement_rates
 
-            # track replacement rate
-            replacement_rates = self._calculate_replacement_rate(aux)
-            self.replacement_rates.append(replacement_rates)
+    def _allocate_hist(self, state, params, T):
+        total = self.config.burnin + self.config.samples
 
-        return self.param_hist
-    
-    # def initialise_sample_cache(self, key, data):
+        # includes the initial draw at index 0
+        self.sample_hist = tree_util.tree_map(lambda x: np.empty((total + 1,) + x.shape), state[0])
+        self.ancestor_hist = np.empty((total + 1,) + state[1].shape)
+        self.param_hist = tree_util.tree_map(lambda x: np.empty((total + 1,) + x.shape), params)
+        self.replacement_rates = np.empty((total, T), dtype=np.float32)
+
+        # store initial samples 
+        self.sample_hist = tree_util.tree_map(
+            lambda hist, x: self._set_host_value(hist, 0, x),
+            self.sample_hist,
+            state[0],
+        )
+        self.param_hist = tree_util.tree_map(
+            lambda hist, x: self._set_host_value(hist, 0, x),
+            self.param_hist,
+            params,
+        )
+        self.ancestor_hist[0] = np.asarray(state[1])
+
+        # replacement rate window
+        window = min(self.config.replacement_rate_window, total)
+        self.replaced_hist = np.zeros((window, T), dtype=bool)
+        self.replaced_count = 0
+        self.replaced_position = 0
+
+    def _store_iteration(self, itr, state, params, replacement_rates):
+        """ index 0 is initialisation; Gibbs iteration itr is stored at itr + 1 """
+        hist_idx = itr + 1
+
+        self.sample_hist = tree_util.tree_map(
+            lambda hist, x: self._set_host_value(hist, hist_idx, x),
+            self.sample_hist,
+            state[0],
+        )
+        self.param_hist = tree_util.tree_map(
+            lambda hist, x: self._set_host_value(hist, hist_idx, x),
+            self.param_hist,
+            params,
+        )
+        self.ancestor_hist[hist_idx] = np.asarray(state[1])
+        self.replacement_rates[itr] = replacement_rates
+
+    @staticmethod
+    def _set_host_value(hist, idx, value):
+        hist[idx] = np.asarray(value)
+        return hist
+
+    def _calculate_replacement_rate(self, replaced):
+        """ Calculate the replacement rate of SMC kernel over a window of sample time """
+        replaced = np.asarray(replaced, dtype=bool)
+
+        self.replaced_hist[self.replaced_position] = replaced
+        self.replaced_position = (self.replaced_position + 1) % self.replaced_hist.shape[0]
+        self.replaced_count = min(self.replaced_count + 1, self.replaced_hist.shape[0])
+
+        return self.replaced_hist[:self.replaced_count].mean(axis=0)
+
+
+
+# def run(self, data, dts: Array, hyperparams: dict):
+#         """
+#         Runs Bayesian Inference.
+
+#         Parameters
+#         ----------
+#         data:         PyTree of observations with leaves of shape (T, *D), where 
+#                           - T is the number of time-steps
+#                           - *D is the arbitrary observation dimension
+#         dts:          The set of time-differentials between each observation time
+#         hyperparams:  Fixed / initial parameters required for prior initialisation
+#         """
+       
+#         data_leaf = tree_util.tree_leaves(data)[0]
+#         T = data_leaf.shape[0]
+
+#         train_step = jax.jit(self.train_step) if not self.config.debug else self.train_step
+        
+#         # initialisation
+#         key, sample_key, param_key = jr.split(jr.PRNGKey(self.config.seed), 3)
+#         self.params = self.gibbs.init(param_key, hyperparams)
+#         state = self.smc.init(sample_key, self.params, data)
+
+#         # stores
+#         self.energies = []
+#         self.replaced_hist = jnp.zeros((T, self.config.replacement_rate_window)) * jnp.nan  
+#         self.replacement_rates = []
+
+#         self.param_hist = deepcopy(self.params)
+#         self.sample_hist = tree_util.tree_map(lambda _s: _s[None, ...], state[0])  # prepend itr dimension
+#         self.ancestor_hist = state[1][None, ...]                                   # prepend itr dimension
+
+#         # run
+#         pbar = tqdm(range(self.config.burnin + self.config.samples))
+#         for self.itr in pbar:
+#             key, subkey = jr.split(key)
+
+#             energy, self.params, state, aux = train_step(subkey, self.params, state, dts, data)
+
+#             # track energy
+#             energy_float = float(energy)
+#             self.energies.append(energy)
+#             pbar.set_postfix(loss=f"{energy_float:.3f}")
+
+#             # store parameter history for traces
+#             self.param_hist = self._append_param_hist(self.itr, self.param_hist, self.params)
+            
+#             # store trajectory and ancestory history
+#             self.sample_hist = self._append_state_hist(self.sample_hist, state[0])
+#             self.ancestor_hist = self._append_state_hist(self.ancestor_hist, state[1])
+
+#             # track replacement rate
+#             replacement_rates = self._calculate_replacement_rate(aux)
+#             self.replacement_rates.append(replacement_rates)
+
+#         return self.sample_hist, self.ancestor_hist, self.param_hist, self.replacement_rates
+
+    # def _calculate_replacement_rate(self, aux: dict):
     #     """
-    #     Produces rough initial latent reference paths for a dataset or minibatch.
+    #     Calculate the replacement rate of SMC kernel over a window of sample time
+    #     """
+    #     replaced = aux["replaced"]             # (T,)
+
+    #     # maintain a replacement rate window
+    #     self.replaced_hist = self.replaced_hist.at[:, 1:].set(self.replaced_hist[:, :-1])  # (T, Window)
+    #     self.replaced_hist = self.replaced_hist.at[:, 0].set(replaced)                     # (T, Window)
+
+    #     # replacement rate calculated over said window
+    #     replacement_rates = jnp.nanmean(self.replaced_hist, 1) # (T,)
+    #     return replacement_rates
+
+    # def _append_param_hist(self, itr: int, hist: dict, params: dict):
+    #     """ 
+    #     Appends the current trainable prior parameters along a leading iteration axis
 
     #     Parameters
     #     ----------
-    #     key:  RNG key used by the sample initialiser.
-    #     data: Observation PyTree with leaves of shape (N, T, *_).
-    #     """
-    #     return self.prior.sample_init(key=key, params=self.params["prior"], data=data)
-    
-    def _calculate_replacement_rate(self, aux: dict):
-        """
-        Calculate the replacement rate of SMC kernel over a window of sample time
-        """
-        ancestors = aux["As"]             # (B, T)
-        next_ancestors = aux["next_As"]   # (B, S, T)
-
-        replaced = ancestors[:, None, :] != next_ancestors    # (B, S, T)
-        replaced = jnp.mean(replaced, axis=(0, 1))            # (T,)
-
-        self.replaced_hist = self.replaced_hist.at[:, 1:].set(self.replaced_hist[:, :-1])  # (T, Window)
-        self.replaced_hist = self.replaced_hist.at[:, 0].set(replaced)                     # (T, Window)
+    #     itr:     current iteration number
+    #     hist:    dictionary of historical parameter values
+    #     params:  dictionary of current iteration parameter values
         
-        replacement_rates = jnp.nanmean(self.replaced_hist, 1) # (T,)
-        return replacement_rates
-    
-    def _append_param_hist(self, itr: int, hist: dict, params: dict):
-        """
-        Appends the current trainable prior parameters along a leading
-        iteration axis while leaving fixed parameters unchanged.
-        """
-        hist_trainable = hist["prior"]["trainable"]
-        trainable = params["prior"]["trainable"]
-
-        # append the latest value to the existing history axis
-        if itr == 0:
-            hist_trainable = tree_util.tree_map(
-                lambda old, new: jnp.stack((old, new), axis=0),
-                hist_trainable,
-                trainable,
-            )
-        else:
-            hist_trainable = tree_util.tree_map(
-                lambda old, new: jnp.concatenate((old, new[None, ...]), axis=0),
-                hist_trainable,
-                trainable,
-            )
-
-        return {**hist, "prior": {**hist["prior"], "trainable": hist_trainable,}}
-    
-    def _append_sample_hist(self, hist, sample):
-        """
-        
-        Parameters
-        ----------
-        hist:    Pytree (itr, B, T, *D) - current total sample history
-        sample:  Pytree (B, T, *D)      - single sample from SMC with current prior params
-
-        Returns
-        -------
-        new_hist:  Extended sample history
-        """
-        return tree_util.tree_map(lambda old, new: jnp.concatenate((old, new[None, ...]), axis=0), hist, sample)
-    
-    # def apply(
-    #         self, 
-    #         key,
-    #         data,
-    #         inits: Array | None,
-    #         num_iter: int = 1,
-    #     ):
+    #     Returns
+    #     -------
+    #     updated_hist 
     #     """
-    #     Runs posterior sampling on new data.
-
+    #     if itr == 0:
+    #         return tree_util.tree_map(lambda old, new: jnp.stack((old, new)), hist, params)
+    #     return tree_util.tree_map(lambda old, new: jnp.concatenate((old, new[None]), axis=0), hist, params)
+    
+    # def _append_state_hist(self, hist, sample):
+    #     """
+        
     #     Parameters
     #     ----------
-    #     key:       RNG key used for initialisation and posterior sampling.
-    #     data:      Observation PyTree with leaves of shape (B, T, *_).
-    #     inits:     Optional initial reference paths. If None, these are initialised from sample_init.
-    #     num_iter:  Number of posterior sampler calls.
+    #     hist:    Pytree (itr, T, *D) - current total sample history
+    #     sample:  Pytree (T, *D)      - single sample from SMC with current prior params
 
     #     Returns
     #     -------
-    #     samples:  Posterior samples from the final posterior call.
+    #     new_hist:  Extended sample history
     #     """
-    #     assert num_iter >= 1, "num_iter must be at least 1 for Trainer.apply"
-
-    #     key, init_key = jr.split(key)
-    #     samples = self.initialise_sample_cache(init_key, data) if inits is None else inits
-
-    #     _get_posterior = lambda _key, _smpls, _data: self.get_posterior(_key, self.params, _smpls, _data)
-    #     _get_posterior = jax.jit(_get_posterior)
-
-    #     keys = jr.split(key, num_iter)
-    #     pbar = tqdm(range(num_iter - 1), desc="Apply")
-    #     for itr in pbar:
-    #         _key = keys[itr]
-    #         samples, *_ = _get_posterior(_key, samples, data)
-    #         samples = tree_util.tree_map(lambda z: z[:, -1], samples)
-
-    #     return _get_posterior(keys[-1], samples, data)[0]
+    #     return tree_util.tree_map(lambda old, new: jnp.concatenate((old, new[None, ...]), axis=0), hist, sample)
+    
