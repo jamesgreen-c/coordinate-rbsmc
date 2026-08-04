@@ -1,4 +1,7 @@
 import argparse
+import os
+
+import numpy as np
 
 import jax.numpy as jnp
 import jax.random as jr
@@ -8,16 +11,21 @@ from jax.random import PRNGKey
 from rbsmc.utils.common import force_move
 from rbsmc.utils.resamplings import killing
 from rbsmc.bayesian.smc import SMC
-from rbsmc.bayesian.training_rework import BayesianInference, Config
+from rbsmc.bayesian.training import ParticleGibbs, Config
+from rbsmc.bayesian.gibbs import Gibbs
 
-from bayesian_rework.data import get_data, get_prior_params
-from bayesian_rework.kernels import CSMC
+from experiments.bayesian_rework.data import get_data, get_prior_params
+from experiments.bayesian_rework.kernels import CSMC
+from experiments.bayesian_rework.gibbs import make_blocks
+
 
 parser = argparse.ArgumentParser()
 
+parser.add_argument("--M", dest="M", type=int, default=1)  # number of chains
+
 parser.add_argument("--T", dest="T", type=int, default=100)
 parser.add_argument("--D", dest="D", type=int, default=1)
-parser.add_argument("--steps", type=int, default=100)
+parser.add_argument("--steps", type=int, default=99)
 
 parser.add_argument("--burnin", type=int, default=500)
 parser.add_argument("--samples", dest="samples", type=int, default=500)
@@ -65,11 +73,12 @@ KERNEL = SMC(
 )
 
 # GIBBS CONFIG
-GIBBS = None # TODO
+BLOCKS = make_blocks(D=args.D)
+GIBBS = Gibbs(blocks=BLOCKS)
 
 # INFERENCE CONFIG
 CONFIG = Config(samples=args.samples, burnin=args.burnin, seed=args.seed)
-SAMPLER = BayesianInference(smc=KERNEL, gibbs=GIBBS, config=CONFIG)
+SAMPLER = ParticleGibbs(smc=KERNEL, gibbs=GIBBS, config=CONFIG)
 
 
 def one_experiment(key: PRNGKey):
@@ -79,8 +88,47 @@ def one_experiment(key: PRNGKey):
     true_xs, data = get_data(key=data_key, dim=args.D, dts=DTs, **PRIOR_PARAMS)
 
     # run particle Gibbs
-    samples, ancestors, params, replacement_rates = SAMPLER.run(data)
+    # passing prior params uses true params only for those without Gibbs blocks
+    samples, ancestors, params, replacement_rates = SAMPLER.run(data, DTs, PRIOR_PARAMS)
 
-    return samples, ancestors, params, replacement_rates, SAMPLER.energies
+    return samples, ancestors, params, replacement_rates, SAMPLER.energies, true_xs, data
 
 
+if __name__ == "__main__": 
+
+    samples, As, params, replacement_rates, energies, true_xs, data = one_experiment(EXPERIMENT_KEY)
+
+    # save results
+    if not os.path.exists("results"):
+        os.mkdir("results")
+
+    experiment_name = "kernel={},D={},T={},phi={},log-var={},N={},samples={},burnin={},conditional={},seed={}"
+    experiment_name = experiment_name.format(
+        csmc.name,
+        args.D,
+        args.T,
+        args.phi,
+        args.log_var,
+        args.N,
+        args.samples,
+        args.burnin,
+        args.conditional,
+        args.seed,
+    )
+
+    dirpath = f"results/{experiment_name}"
+    if not os.path.exists(dirpath):
+        os.mkdir(dirpath)
+
+    datapath = f"{dirpath}/data.npz"
+    np.savez_compressed(
+        datapath,
+        trajectories=samples,
+        ancestors=As,
+        params=params,
+        energies=energies,
+        replacement_rates=replacement_rates,
+        xs=true_xs,
+        data=data,
+        true_params=PRIOR_PARAMS
+    )
