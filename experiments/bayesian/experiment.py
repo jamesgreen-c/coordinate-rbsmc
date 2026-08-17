@@ -3,34 +3,38 @@ import os
 
 import numpy as np
 
-import jax
+import jax.numpy as jnp
 import jax.random as jr
-from jax.tree_util import tree_map
 
-from rbsmc.utils.common import force_move, barker_move
-from rbsmc.utils.resamplings import killing, multinomial
+import jax
+jax.config.update('jax_enable_x64', True)
 
-from rbsmc.expmax.free_energy import constructor as free_energy_constructor
-from rbsmc.bayesian.training import BayesianInference, Config
+from jax.random import PRNGKey
 
-from experiments.bayesian import prior
-from experiments.bayesian.kernels import KernelType, get_csmc_kernel
+from rbsmc.utils.common import force_move
+from rbsmc.utils.resamplings import killing
+from rbsmc.bayesian.smc import SMC
+from rbsmc.bayesian.training import ParticleGibbs, Config
+from rbsmc.bayesian.gibbs import Gibbs
 
-# ARGS PARSING
+from experiments.bayesian.data import get_data, get_prior_params
+from experiments.bayesian.kernels import CSMC, RBcSMC
+from experiments.bayesian.gibbs import make_blocks
+
+
 parser = argparse.ArgumentParser()
 
-parser.add_argument("--T", dest="T", type=int, default=100)
+parser.add_argument("--M", dest="M", type=int, default=1)  # number of chains
+
+parser.add_argument("--T", dest="T", type=int, default=500)
 parser.add_argument("--D", dest="D", type=int, default=1)
-parser.add_argument("--steps", type=int, default=100)
+parser.add_argument("--steps", type=int, default=499)
 
 parser.add_argument("--burnin", type=int, default=500)
 parser.add_argument("--samples", dest="samples", type=int, default=500)
 
-parser.add_argument("--phi", type=float, default=0.8)
+parser.add_argument("--phi", type=float, default=0.1)
 parser.add_argument("--log-var", dest="log_var", type=float, default=0)
-
-parser.add_argument("--kernel", dest="kernel", type=int, default=KernelType.CSMC)
-parser.add_argument("--style", dest="style", default="bootstrap")
 
 parser.add_argument("--seed", dest="seed", type=int, default=1234)
 
@@ -50,117 +54,95 @@ parser.set_defaults(debug=False)
 
 args = parser.parse_args()
 
-# CONFIG
-CONFIG = Config(burnin=args.burnin, samples=args.samples, seed=args.seed, debug=args.debug)
-kernel_type = KernelType(args.kernel)
-param_key, experiment_key = jr.split(jr.PRNGKey(args.seed))
+# RNG
+KEY = PRNGKey(0)  # same every time
+INIT_KEY, EXPERIMENT_KEY = jr.split(KEY)
 
-# TRUE PRIOR PARAMETERS
-(A, CHOL_Q0, CHOL_H0, CHOL_Q, CHOL_H, 
- BETA, DELTA, LLAMBDA, TAU, CHOL_R, 
- PSI, ALPHA, DTs) = prior.get_prior_params(param_key, args.D, args.T, args.steps, args.phi, args.log_var)
+# INIT TRUE PARAMETERS
+PRIOR_PARAMS, DTs = get_prior_params(INIT_KEY, 
+                                     args.D, 
+                                     args.T, 
+                                     args.steps, 
+                                     args.phi, 
+                                     args.log_var)
 
-
-def one_experiment(key):
-
-    # sample true data
-    _get_data = lambda _k: prior.get_data(
-        _k, args.D, DTs, 
-        A, PSI, CHOL_Q0, CHOL_Q, CHOL_H0, CHOL_H, CHOL_R, ALPHA,
-        sparsity_factor=1.0
-    )
-    true_xs, data, *_ = _get_data(key)
-    data = tree_map(lambda _d: _d[None, ...], data)  # data needs leading dimension for free energy
-
-    # Kernel used for Gibbs iterations
-    kernel_kwargs = dict(
-        N=args.N, dts=DTs, resampling_func=killing, backward=args.backward,
-        ancestor_move_func=force_move, style=args.style, sweeps=1
-    )
-    kernel, kernel_init = kernel_type.kernel_maker(conditional=args.conditional, **kernel_kwargs)
-    
-    # loss function used for Gibbs iterations
-    posterior_fn, loss_fn = free_energy_constructor(prior=prior, 
-                                                    smc_init=kernel_init, 
-                                                    smc=kernel, 
-                                                    n_samples=1, 
-                                                    dts=DTs)
-
-    # set unconditional posterior function for x0 initialisation
-    if args.conditional:
-        initial_kernel, initial_kernel_init = kernel_type.kernel_maker(conditional=False, **kernel_kwargs)
-        initial_posterior_fn, _ = free_energy_constructor(prior=prior,
-                                                          smc_init=initial_kernel_init,
-                                                          smc=initial_kernel, 
-                                                          n_samples=1,
-                                                          dts=DTs)
-    else:
-        initial_posterior_fn = posterior_fn
-
-
-    # define prior init - only learn A
-    prior_init = lambda _: prior.init(
-        dim=args.D,
-        A=A,
-        tau=TAU,
-        llambda=LLAMBDA,
-        chol_Q0=CHOL_Q0,
-        chol_H0=CHOL_H0,
-        chol_Q=CHOL_Q,
-        chol_R=CHOL_R,
-        psi=PSI,
-        alpha=ALPHA,
-        dts=DTs,
-    )
-
-    # define and run Bayesian inference
-    trainer = BayesianInference(
-        posterior_function=posterior_fn,
-        initial_posterior_function=initial_posterior_fn,
-        loss_function=loss_fn,
-        prior_init=prior_init,
-        prior=prior,
-        config=CONFIG,
-    )
-    trainer.fit(data)
-
-    return trainer.loss_hist, trainer.param_hist, trainer.sample_hist, trainer.replacement_rates, true_xs, data
-
-loss_history, param_hist, sample_hist, replacement_rates, true_xs, data = one_experiment(experiment_key)
-
-# save results
-if not os.path.exists("results"):
-    os.mkdir("results")
-
-experiment_name = "kernel={},D={},T={},phi={},log-var={},N={},samples={},burnin={},conditional={},seed={}"
-experiment_name = experiment_name.format(
-    kernel_type.name,
-    args.D,
-    args.T,
-    args.phi,
-    args.log_var,
-    args.N,
-    args.samples,
-    args.burnin,
-    args.conditional,
-    args.seed,
+# SMC CONFIG
+# csmc = CSMC(N=args.N, D=args.D, dts=DTs)
+csmc = RBcSMC(N=args.N, D=args.D, dts=DTs)
+kwargs = dict(resampling_func=killing, backward=args.backward, ancestor_move_func=force_move) 
+KERNEL = SMC(
+    fk=csmc, 
+    conditional=args.conditional,
+    kwargs=kwargs
 )
 
-dirpath = f"results/{experiment_name}"
-if not os.path.exists(dirpath):
-    os.mkdir(dirpath)
+# GIBBS CONFIG
+BLOCKS = make_blocks(D=args.D)
+GIBBS = Gibbs(blocks=BLOCKS)
 
-datapath = f"{dirpath}/data.npz"
-np.savez_compressed(
-    datapath,
-    param_hist=param_hist,
-    sample_hist=sample_hist,
-    true_A=A,
-    true_beta=BETA,
-    true_delta=DELTA,
-    true_tau=TAU,
-    loss_history=loss_history,
-    replacement_rates=replacement_rates,
-    xs=true_xs,
-    data=data,
-)
+# INFERENCE CONFIG
+CONFIG = Config(samples=args.samples, burnin=args.burnin, seed=args.seed)
+SAMPLER = ParticleGibbs(smc=KERNEL, gibbs=GIBBS, config=CONFIG)
+
+print(f"""
+========================
+Configuration
+    - D:     {args.D}
+    - T:     {args.T}
+    - steps: {args.steps}
+    - csmc:  {csmc.name}
+========================
+""")
+
+def one_experiment(key: PRNGKey):
+
+    # generate data
+    key, data_key = jr.split(key)
+    dataset = get_data(key=data_key, dim=args.D, dts=DTs, params=PRIOR_PARAMS)
+    scaled_dataset = dataset.standardised_data
+    scaled_params = dataset.standardised_params
+
+    # run particle Gibbs. Passing prior params uses true params only for those without Gibbs blocks
+    samples, ancestors, params, replacement_rates = SAMPLER.run(scaled_dataset, DTs, scaled_params)
+    return samples, ancestors, params, replacement_rates, SAMPLER.energies, dataset
+
+
+if __name__ == "__main__": 
+
+    samples, As, params, replacement_rates, energies, dataset = one_experiment(EXPERIMENT_KEY)
+
+    # save results
+    if not os.path.exists("results"):
+        os.mkdir("results")
+
+    experiment_name = "kernel={},D={},T={},phi={},log-var={},N={},samples={},burnin={},conditional={},seed={}"
+    experiment_name = experiment_name.format(
+        csmc.name,
+        args.D,
+        args.T,
+        args.phi,
+        args.log_var,
+        args.N,
+        args.samples,
+        args.burnin,
+        args.conditional,
+        args.seed,
+    )
+
+    dirpath = f"results/{experiment_name}"
+    if not os.path.exists(dirpath):
+        os.mkdir(dirpath)
+
+    datapath = f"{dirpath}/data.npz"
+    np.savez_compressed(
+        datapath,
+        trajectories=samples,
+        ancestors=As,
+        params=params,
+        energies=energies,
+        replacement_rates=replacement_rates,
+        dataset=dataset,
+        true_params=PRIOR_PARAMS,
+        standardisation_means=dataset.means,
+        standardisation_scales=dataset.stds,
+    )
