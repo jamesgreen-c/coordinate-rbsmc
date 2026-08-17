@@ -67,18 +67,18 @@ class Horseshoe:
         key_gamma, key_alpha, key_lambda, key_nu = jr.split(key, 4)
 
         # beta_{-d,-d}^{-1}, obtained from the current covariance Q = beta^{-1}
-        Q_dd_inv = Q[jnp.ix_(idx, idx)] - jnp.outer(Q[idx, d], Q[idx, d]) / Q[d, d]
+        beta_minor_inv = Q[jnp.ix_(idx, idx)] - jnp.outer(Q[idx, d], Q[idx, d]) / Q[d, d]
 
         # gamma ~ Gamma(N / 2 + 1, rate=scatter[d, d] / 2)
         gamma = jr.gamma(key_gamma, (N/2) + 1) * (2 / scatter[d, d])
 
         # alpha ~ N(-C scatter[-d,d], C)
         prior_precision = jnp.diag(1 / (llambda[idx, d] * tau**2))
-        precision = scatter[d, d] * Q_dd_inv + prior_precision
+        precision = scatter[d, d] * beta_minor_inv + prior_precision
         alpha = cls._sample_normal(key_alpha, precision, scatter[idx, d])
 
         # transform (alpha, gamma) back to the precision-matrix elements
-        beta_dd = gamma + alpha @ Q_dd_inv @ alpha
+        beta_dd = gamma + alpha @ beta_minor_inv @ alpha
         beta = beta.at[idx, d].set(alpha)
         beta = beta.at[d, idx].set(alpha)
         beta = beta.at[d, d].set(beta_dd)
@@ -93,8 +93,8 @@ class Horseshoe:
         nu = nu.at[d, idx].set(nu_d)
 
         # block inverse update for Q = beta^{-1}
-        v = Q_dd_inv @ alpha
-        Q_minor = Q_dd_inv + jnp.outer(v, v) / gamma
+        v = beta_minor_inv @ alpha
+        Q_minor = beta_minor_inv + jnp.outer(v, v) / gamma
         Q_cross = -v / gamma
 
         Q = Q.at[jnp.ix_(idx, idx)].set(Q_minor)
