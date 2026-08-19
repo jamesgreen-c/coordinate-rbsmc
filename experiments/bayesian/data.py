@@ -261,8 +261,8 @@ def get_prior_params(key, D, T, steps, phi, log_var):
         ])
 
         # convert basis points into scaled percentage-point units
-        sigmas = scale * sigmas_bps / 10_000
-        H = correlation * jnp.outer(sigmas, sigmas)
+        sigmas = sigmas_bps / 100
+        H = scale**2 * correlation * jnp.outer(sigmas, sigmas)
     else:
         H = scale**2 * block_sparse_covariance(H_key, D)
 
