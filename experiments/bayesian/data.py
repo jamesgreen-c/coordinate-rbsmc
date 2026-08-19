@@ -58,9 +58,13 @@ def emission(
 
     spread_i = psi[i] * jnp.exp(z[i])
     eps = r * jr.normal(key_eps)
+    # print("spread :", spread_i)
+    # print("eps: ", eps)
 
     done_buy = eta[i] - spread_i + eps
     done_sell = eta[i] + spread_i + eps
+
+    # print("done buy: ", done_buy)
 
     # for traded-away events we simulate a quote Z consistent with the event.
     margin = jnp.abs(r * jr.normal(key_aux))
@@ -195,6 +199,42 @@ def get_data(
     # return xs, obs
 
 
+# def get_prior_params(key, D, T, steps, phi, log_var):
+#     m0_key, H_key = jr.split(key)
+
+#     # log half-spread transition matrix
+#     A = phi * jnp.eye(D)
+
+#     # mid-YtB initial mean, in percentage-point units
+#     scale = 100
+#     M0 = scale * jr.uniform(m0_key, shape=(D,), minval=0.5, maxval=1.0)
+
+#     # covariance parameters
+#     Q0 = 0.01 * jnp.eye(D)                             # initial uncertainty about log half-spreads
+#     Q = 0.01 * jnp.eye(D)                              # daily log half-spread diffusion covariance
+#     H0 = (scale * 0.01)**2 * jnp.eye(D)                # initial uncertainty about the mid-YtB
+#     H = scale**2 * block_sparse_covariance(H_key, D)   # daily mid-YtB diffusion covariance
+#     R = (scale * 0.000025)**2 * jnp.eye(D)             # observation-noise standard deviation approximately 0.2–0.3 bp
+
+#     PSI = scale * 0.007 * jnp.ones(D)                  # baseline half-spread: approximately 0.5–0.8 bp
+#     ALPHA = scale * 0.005 * jnp.ones(D)                # D2D interval half-width; example value of 0.5 bp
+
+#     DTs = jnp.repeat(T / steps, steps)
+
+#     params = {
+#         "A": A,
+#         "m0": M0,
+#         "Q0": Q0,
+#         "H0": H0,
+#         "Q": Q,
+#         "H": H,
+#         "R": R,
+#         "psi": PSI,
+#         "alpha": ALPHA,
+#     }
+
+#     return params, DTs
+
 def get_prior_params(key, D, T, steps, phi, log_var):
     m0_key, H_key = jr.split(key)
 
@@ -206,15 +246,28 @@ def get_prior_params(key, D, T, steps, phi, log_var):
     M0 = scale * jr.uniform(m0_key, shape=(D,), minval=0.5, maxval=1.0)
 
     # covariance parameters
-    Q0 = 0.01 * jnp.eye(D)                             # initial uncertainty about log half-spreads
-    Q = 0.01 * jnp.eye(D)                              # daily log half-spread diffusion covariance
+    Q0 = 0.1 * jnp.eye(D)                              # initial uncertainty about log half-spreads
+    Q = 0.1 * jnp.eye(D)                               # daily log half-spread diffusion covariance
     H0 = (scale * 0.01)**2 * jnp.eye(D)                # initial uncertainty about the mid-YtB
-    H = scale**2 * block_sparse_covariance(H_key, D)   # daily mid-YtB diffusion covariance
-    R = (scale * 0.0025)**2 * jnp.eye(D)               # observation-noise standard deviation approximately 0.2–0.3 bp
+    R = (scale * 0.00025)**2 * jnp.eye(D)               # observation-noise standard deviation approximately 0.2–0.3 bp
+
+    if D == 3:
+        # Guéant and Pu: volatilities in bp per sqrt(day)
+        sigmas_bps = jnp.array([0.50, 0.62, 0.69])
+        correlation = jnp.array([
+            [1.000, 0.843, 0.835],
+            [0.843, 1.000, 0.887],
+            [0.835, 0.887, 1.000],
+        ])
+
+        # convert basis points into scaled percentage-point units
+        sigmas = scale * sigmas_bps / 10_000
+        H = correlation * jnp.outer(sigmas, sigmas)
+    else:
+        H = scale**2 * block_sparse_covariance(H_key, D)
 
     PSI = scale * 0.007 * jnp.ones(D)                  # baseline half-spread: approximately 0.5–0.8 bp
     ALPHA = scale * 0.005 * jnp.ones(D)                # D2D interval half-width; example value of 0.5 bp
-
     DTs = jnp.repeat(T / steps, steps)
 
     params = {

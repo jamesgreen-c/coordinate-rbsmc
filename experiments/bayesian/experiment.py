@@ -20,6 +20,7 @@ from rbsmc.bayesian.gibbs import Gibbs
 from experiments.bayesian.data import get_data, get_prior_params
 from experiments.bayesian.kernels import CSMC, RBcSMC
 from experiments.bayesian.gibbs import make_blocks
+from experiments.bayesian.utils import print_z_diagnostics
 
 
 parser = argparse.ArgumentParser()
@@ -99,6 +100,8 @@ def one_experiment(key: PRNGKey):
     # generate data
     key, data_key = jr.split(key)
     dataset = get_data(key=data_key, dim=args.D, dts=DTs, params=PRIOR_PARAMS)
+    # print_z_diagnostics(dataset)
+
     scaled_dataset = dataset.standardised_data
     scaled_params = dataset.standardised_params
 
@@ -115,11 +118,12 @@ if __name__ == "__main__":
     if not os.path.exists("results"):
         os.mkdir("results")
 
-    experiment_name = "kernel={},D={},T={},phi={},log-var={},N={},samples={},burnin={},conditional={},seed={}"
+    experiment_name = "kernel={},D={},T={},steps={},phi={},log-var={},N={},samples={},burnin={},conditional={},seed={}"
     experiment_name = experiment_name.format(
         csmc.name,
         args.D,
         args.T,
+        args.steps,
         args.phi,
         args.log_var,
         args.N,
