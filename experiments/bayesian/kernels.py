@@ -1,20 +1,19 @@
-from enum import Enum
-
-import jax
 import jax.numpy as jnp
 import jax.random as jr
+
+from jax import Array, vmap
+from jax.random import PRNGKey
 from jax.tree_util import tree_map, tree_leaves
 from jax.scipy.linalg import solve_triangular
 
 import rbsmc.csmc as csmc
 import rbsmc.rb_csmc as rb_csmc
+import rbsmc.gueant as gueant
+
 from rbsmc.utils.mvn import mvn_logpdf
+from rbsmc.bayesian.smc import FeynmanKac
 
 from experiments.bayesian.prior import log_p0, log_pt, log_ht, ou_diag_transition
-
-from jax import Array, vmap
-from jax.random import PRNGKey
-from rbsmc.bayesian.smc import FeynmanKac
 
 ######################################
 #       CSMC Feynman-Kac Model       # 
@@ -397,5 +396,143 @@ class RBcSMC(FeynmanKac):
             M_t_logpdf, rts_func,
             inps,
             N=self.N, conditional=conditional,
+            **kwargs
+        )
+
+
+class GueantCSMC(FeynmanKac):
+
+    name: str = "GUEANT"
+
+    def __init__(
+            self,
+            N: int,
+            D: int,
+            dts: Array,
+        ):
+        """
+        Parameters
+        ----------
+        N:    Number of particles excluding the retained reference particle
+        D:    Latent state dimension
+        dts:  (K-1,) transition times where K is the number of observations
+        """
+        self.N = N
+        self.D = D
+        self.dts = dts
+
+    def M0_rvs(self, params, key, _, inp):
+        """ Sample from the initial full-state distribution """
+        Q0 = params["Q0"]
+        H0 = params["H0"]
+        m0 = params["m0"]
+
+        key_z, key_eta = jr.split(key)
+        chol_Q0 = jnp.linalg.cholesky(Q0)
+        chol_H0 = jnp.linalg.cholesky(H0)
+
+        z_0 = jr.normal(key_z, shape=(self.N+1, self.D)) @ chol_Q0.T
+        eta_0 = m0 + jr.normal(key_eta, shape=(self.N+1, self.D)) @ chol_H0.T
+        return z_0, eta_0
+
+    def M0_logpdf(self, params, x0, inp, constant: bool):
+        """ Evaluate the initial full-state density """
+        return log_p0(params, x0, constant=constant)
+        # Q0 = params["Q0"]
+        # H0 = params["H0"]
+        # m0 = params["m0"]
+        # z_0, eta_0 = x0
+
+        # chol_Q0 = jnp.linalg.cholesky(Q0)
+        # chol_H0 = jnp.linalg.cholesky(H0)
+        # inv_chol_Q0 = solve_triangular(chol_Q0, jnp.eye(self.D), lower=True)
+        # inv_chol_H0 = solve_triangular(chol_H0, jnp.eye(self.D), lower=True)
+
+        # val = mvn_logpdf(z_0, jnp.zeros_like(z_0), None, chol_inv=inv_chol_Q0, constant=constant)
+        # val += mvn_logpdf(eta_0, jnp.broadcast_to(m0, eta_0.shape), None, chol_inv=inv_chol_H0, constant=constant)
+        # return val
+
+    def Mt_logpdf(self, params, x_t_m_1, x_t, inp, constant: bool):
+        """ Evaluate the full-state transition density """
+        _, _, dt, _ = inp
+        return log_pt(params, x_t_m_1, x_t, dt=dt, constant=constant)
+        # H = params["H"]
+        # _, F_t, chol_Q_t, dt = inp
+        # z_t_m_1, eta_t_m_1 = x_t_m_1
+        # z_t, eta_t = x_t
+
+        # chol_H_t = jnp.sqrt(dt) * jnp.linalg.cholesky(H)
+        # inv_chol_Q_t = solve_triangular(chol_Q_t, jnp.eye(self.D), lower=True)
+        # inv_chol_H_t = solve_triangular(chol_H_t, jnp.eye(self.D), lower=True)
+
+        # val = mvn_logpdf(z_t, z_t_m_1 @ F_t.T, None, chol_inv=inv_chol_Q_t, constant=constant)
+        # val += mvn_logpdf(eta_t, eta_t_m_1, None, chol_inv=inv_chol_H_t, constant=constant)
+        # return val
+
+    def G0_logpdf(self, params, x0, inp):
+        """ Evaluate the initial emission density """
+        data = inp[-1]
+        return log_ht(params, x0, data)
+
+    def Gt_logpdf(self, params, x_t, inp):
+        """ Evaluate the emission density """
+        data = inp[-1]
+        return log_ht(params, x_t, data)
+
+    def Gamma_0_logpdf(self, params, x0, inp):
+        """ Evaluate the initial unnormalised Feynman-Kac density """
+        return self.M0_logpdf(params, x0, inp, constant=True) + self.G0_logpdf(params, x0, inp)
+
+    def Gamma_t_logpdf(self, params, x_t_m_1, x_t, inp):
+        """ Evaluate the subsequent unnormalised Feynman-Kac density """
+        return self.Mt_logpdf(params, x_t_m_1, x_t, inp, constant=True) + self.Gt_logpdf(params, x_t, inp)
+
+    def init(self, key: PRNGKey, params: dict, data: tuple[Array], **kwargs):
+        """
+        Initialise the retained trajectory using an unconditional SMC run.
+        """
+        K = self.dts.shape[0] + 1
+        dummy_x = (jnp.zeros((K, self.D)), jnp.zeros((K, self.D)))
+        dummy_state = (dummy_x, jnp.zeros((K,), dtype=int))
+
+        kernel = self.get_kernel(params, dummy_state, data, conditional=False, **kwargs)
+        xs, Bs, log_ws = kernel(key)
+        return xs, Bs
+
+    def get_kernel(
+            self,
+            params: dict,
+            state,
+            data: tuple[Array],
+            conditional: bool,
+            **kwargs
+        ):
+        A = params["A"]
+        Q = params["Q"]
+        H = params["H"]
+        R = params["R"]
+        psi = params["psi"]
+
+        chol_H = jnp.linalg.cholesky(H)
+        chol_R = jnp.linalg.cholesky(R)
+        Fs, chol_Qs = vmap(lambda dt: ou_diag_transition(A, Q, dt))(self.dts)
+
+        inp_0 = tree_map(lambda x: x[0], data),
+        inps = Fs, chol_Qs, self.dts, tree_map(lambda x: x[1:], data),
+
+        M_0_rvs = lambda key, N: self.M0_rvs(params, key, N, inp_0)
+        M_0_logpdf = lambda x: self.M0_logpdf(params, x, inp_0, constant=True)
+        Gamma_0 = lambda x: self.Gamma_0_logpdf(params, x, inp_0)
+        Gamma_t = lambda xp, x, inp: self.Gamma_t_logpdf(params, xp, x, inp)
+
+        M_0 = M_0_rvs, M_0_logpdf
+        Gamma_t_plus_params = Gamma_t, inps
+
+        return lambda key: gueant.kernel(
+            key, state[0], state[1],
+            M_0, Gamma_0,
+            inps, Gamma_t_plus_params,
+            chol_H, chol_R, psi,
+            N=self.N+1, conditional=conditional,
             **kwargs
         )
