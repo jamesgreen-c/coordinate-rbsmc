@@ -18,7 +18,7 @@ from rbsmc.bayesian.training import ParticleGibbs, Config
 from rbsmc.bayesian.gibbs import Gibbs
 
 from experiments.bayesian.data import get_data, get_prior_params
-from experiments.bayesian.kernels import CSMC, RBcSMC
+from experiments.bayesian.kernels import KernelType
 from experiments.bayesian.gibbs import make_blocks
 from experiments.bayesian.utils import print_z_diagnostics
 
@@ -30,6 +30,8 @@ parser.add_argument("--M", dest="M", type=int, default=1)  # number of chains
 parser.add_argument("--T", dest="T", type=int, default=500)
 parser.add_argument("--D", dest="D", type=int, default=1)
 parser.add_argument("--steps", type=int, default=499)
+
+parser.add_argument("--kernel", type=int, default=1)
 
 parser.add_argument("--burnin", type=int, default=500)
 parser.add_argument("--samples", dest="samples", type=int, default=500)
@@ -69,10 +71,10 @@ PRIOR_PARAMS, DTs = get_prior_params(INIT_KEY,
 
 # SMC CONFIG
 # csmc = CSMC(N=args.N, D=args.D, dts=DTs)
-csmc = RBcSMC(N=args.N, D=args.D, dts=DTs)
+kernel = KernelType(args.kernel).kernel_maker(N=args.N, D=args.D, dts=DTs)
 kwargs = dict(resampling_func=killing, backward=args.backward, ancestor_move_func=force_move) 
 KERNEL = SMC(
-    fk=csmc, 
+    fk=kernel, 
     conditional=args.conditional,
     kwargs=kwargs
 )
@@ -88,10 +90,10 @@ SAMPLER = ParticleGibbs(smc=KERNEL, gibbs=GIBBS, config=CONFIG)
 print(f"""
 ========================
 Configuration
-    - D:     {args.D}
-    - T:     {args.T}
-    - steps: {args.steps}
-    - csmc:  {csmc.name}
+    - D:       {args.D}
+    - T:       {args.T}
+    - steps:   {args.steps}
+    - kernel:  {kernel.name}
 ========================
 """)
 
@@ -120,7 +122,7 @@ if __name__ == "__main__":
 
     experiment_name = "kernel={},D={},T={},steps={},phi={},log-var={},N={},samples={},burnin={},conditional={},seed={}"
     experiment_name = experiment_name.format(
-        csmc.name,
+        kernel.name,
         args.D,
         args.T,
         args.steps,
