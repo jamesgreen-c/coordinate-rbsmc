@@ -18,12 +18,21 @@ parser.add_argument("--log-var", dest="log_var", type=float, default=0)
 args = parser.parse_args()
 
 
-def results_exist(*, D, T, steps, args) -> bool:
+def results_exist(*, D, T, steps, args, kernel) -> bool:
     """Mirror experiment.py's experiment_name + datapath convention and check if results already exist."""
 
+    if kernel == 0:
+        kernel_name = "CSMC"
+    elif kernel == 1:
+        kernel_name = "RB_CSMC"
+    elif kernel == 2:
+        kernel_name = "GUEANT"
+    else:
+        raise ValueError("Invalid kernel int provided: must be in [0, 1, 2]")
+    
     experiment_name = "kernel={},D={},T={},steps={},phi={},log-var={},N={},samples={},burnin={},conditional={},seed={}"
     experiment_name = experiment_name.format(
-        "RB_CSMC",
+        kernel_name,
         D,
         T,
         steps,
@@ -42,11 +51,9 @@ def results_exist(*, D, T, steps, args) -> bool:
 
 DS = (3, 10, 15, 20)
 TS = (500, 1000, 1500, 2000, 2500, 3000)
+KERNELS = (0, 1, 2)
 
-combination = [(D, T) for D, T in product(DS, TS) if D < 15 or T >= 1500][::-1]
-for c in combination:
-    print(c)
-
+combination = [(D, T, kernel) for D, T, kernel in product(DS, TS, KERNELS) if D < 15 or T >= 1500][::-1]
 print(f"Number of experiments: {len(combination)}")
 
 if args.i != -1 and not (0 <= args.i < len(combination)):
@@ -55,14 +62,14 @@ if args.i != -1 and not (0 <= args.i < len(combination)):
 indices = range(len(combination)) if args.i == -1 else [args.i]
 
 for j in indices:
-    D, T = combination[j]
+    D, T, kernel = combination[j]
     steps = T - 1
 
-    if results_exist(D=D, T=T, steps=steps, args=args):
-        print(ctext(f"Skipping (already run): D={D}, T={T}, steps={steps}, N={args.N}, samples={args.samples}, burnin={args.burnin}", "yellow"))
+    if results_exist(D=D, T=T, steps=steps, args=args, kernel=kernel):
+        print(ctext(f"Skipping (already run): kernel={kernel} D={D}, T={T}, steps={steps}, N={args.N}, samples={args.samples}, burnin={args.burnin}", "yellow"))
         continue
 
-    exec_str = "python3 experiment.py --D {} --T {} --steps {} --N {} --M {} --samples {} --burnin {} --phi {} --log-var {} --seed {}"
-    exec_str = exec_str.format(D, T, steps, args.N, args.M, args.samples, args.burnin, args.phi, args.log_var, args.seed)
+    exec_str = "python3 experiment.py --kernel {} --D {} --T {} --steps {} --N {} --M {} --samples {} --burnin {} --phi {} --log-var {} --seed {}"
+    exec_str = exec_str.format(kernel, D, T, steps, args.N, args.M, args.samples, args.burnin, args.phi, args.log_var, args.seed)
     print("\nExecuting:", ctext(exec_str, "green"))
     # os.system(exec_str)
