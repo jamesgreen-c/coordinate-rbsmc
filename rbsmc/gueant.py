@@ -30,6 +30,7 @@ def kernel(
         Gamma_t: Union[Callable, tuple[Callable, Any]],
         chol_Q_eta: Array,
         chol_R: Array,
+        alpha: Array,
         psi: Array,
         resampling_func: Callable,
         ancestor_move_func: Callable,
@@ -78,7 +79,7 @@ def kernel(
 
     def z_transition_rvs(key, x_t_m_1, params):
         # unpack
-        _, F_t, chol_B_t, _ = params
+        F_t, chol_B_t, _, _ = params
         z_t_m_1, _ = x_t_m_1
 
         # propose only the half-spread state first, as in Guéant Step 1
@@ -111,9 +112,9 @@ def kernel(
         z_t_hat = z_transition_rvs(key_z_t, x_t_m_1, M_t_params)
 
         # Step 2: compute auxiliary/predictive weights before drawing eta_t
-        obs_t, _, _, dt = M_t_params
+        _, _, dt, obs_t = M_t_params
         _, eta_t_m_1 = x_t_m_1
-        log_pred_t = predictive_obs_logpdf(z_t_hat, eta_t_m_1, obs_t, psi, chol_Q_eta, chol_R, dt)
+        log_pred_t = predictive_obs_logpdf(z_t_hat, eta_t_m_1, obs_t, alpha, psi, chol_Q_eta, chol_R, dt)
         log_aux_w_t = normalize(log_w_t_m_1 + log_pred_t, log_space=True)
         w_aux_t = jnp.exp(log_aux_w_t)
 
@@ -124,7 +125,7 @@ def kernel(
 
         # Step 4--6: draw eta_t from the conditional guided proposal
         eta_t_m_1 = x_t_m_1[1]
-        eta_t = mid_price_proposal(key_eta_t, z_t, eta_t_m_1, obs_t, psi, chol_Q_eta, chol_R, dt)
+        eta_t = mid_price_proposal(key_eta_t, z_t, eta_t_m_1, obs_t, alpha, psi, chol_Q_eta, chol_R, dt)
         x_t = (z_t, eta_t)
 
         if conditional:
@@ -178,6 +179,7 @@ def predictive_obs_logpdf(
         z_t: Array,
         eta_t_m_1: Array,
         obs_t: tuple[Array],
+        alpha: Array,
         psi: Array,
         chol_Q_eta: Array,
         chol_R: Array,
@@ -190,7 +192,7 @@ def predictive_obs_logpdf(
 
     after integrating out eta_t and the observation noise.
     """
-    bond_idx, event_type, alpha_i, obs_value = obs_t
+    obs_value, bond_idx, event_type = obs_t
     bond_idx = bond_idx.astype(jnp.int32)
     event_type = event_type.astype(jnp.int32)
 
@@ -203,6 +205,7 @@ def predictive_obs_logpdf(
 
     # extraction
     eta_prev_i = eta_t_m_1[:, bond_idx]
+    alpha_i = alpha[bond_idx]
     half_spread = psi[bond_idx] * jnp.exp(z_t[:, bond_idx])
 
     # case based evaluation
@@ -224,6 +227,7 @@ def mid_price_proposal(
         z: Array,
         eta_prev: Array,
         obs: tuple[Array],
+        alpha: Array,
         psi: Array,
         chol_Q_eta: Array,
         chol_R: Array,
@@ -246,7 +250,7 @@ def mid_price_proposal(
     N, D = z.shape
     key_i, key_not_i, key_tilde = jr.split(key, 3)
 
-    bond_idx, event_type, alpha_i, obs_value = obs
+    obs_value, bond_idx, event_type = obs
     bond_idx = bond_idx.astype(jnp.int32)
     event_type = event_type.astype(jnp.int32)
 
@@ -259,6 +263,7 @@ def mid_price_proposal(
 
     # extraction
     eta_prev_i = eta_prev[:, bond_idx]
+    alpha_i = alpha[bond_idx]
     half_spread = psi[bond_idx] * jnp.exp(z[:, bond_idx])
 
     standardise = lambda x: (x - eta_prev_i) / std_tilde
@@ -310,6 +315,7 @@ def Mt_tilde_logpdf(
         observation_logpdf: Callable,
         chol_Q_eta: Array,
         chol_R: Array,
+        alpha: Array,
         psi: Array,
 ):
     """
@@ -324,7 +330,7 @@ def Mt_tilde_logpdf(
     z_t, eta_t = x_t
     D = z_t.shape[-1]
 
-    obs_t, F_t, chol_B_t, dt = params
+    F_t, chol_B_t, dt, obs_t = params
 
     # inverse cholesky factors
     inv_chol_B = solve_triangular(chol_B_t, jnp.eye(D), lower=True)
@@ -336,6 +342,6 @@ def Mt_tilde_logpdf(
     log_g = observation_logpdf(z_t, eta_t, obs_t, psi, chol_R)
 
     # guided correction
-    log_pred = predictive_obs_logpdf(z_t, eta_t_m_1, obs_t, psi, chol_Q_eta, chol_R, dt)
+    log_pred = predictive_obs_logpdf(z_t, eta_t_m_1, obs_t, alpha, psi, chol_Q_eta, chol_R, dt)
 
     return log_q_z + log_prior_eta + log_g - log_pred

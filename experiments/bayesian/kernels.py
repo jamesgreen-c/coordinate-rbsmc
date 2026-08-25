@@ -1,3 +1,5 @@
+from enum import Enum
+
 import jax.numpy as jnp
 import jax.random as jr
 
@@ -14,6 +16,24 @@ from rbsmc.utils.mvn import mvn_logpdf
 from rbsmc.bayesian.smc import FeynmanKac
 
 from experiments.bayesian.prior import log_p0, log_pt, log_ht, ou_diag_transition
+
+
+class KernelType(Enum):
+    CSMC = 0
+    RB_CSMC = 1
+    GUEANT = 2
+
+    @property
+    def kernel_maker(self):
+        if self == KernelType.CSMC:
+            return CSMC
+        elif self == KernelType.RB_CSMC:
+            return RBcSMC
+        elif self == KernelType.GUEANT:
+            return GueantCSMC
+        else:
+            raise NotImplementedError
+
 
 ######################################
 #       CSMC Feynman-Kac Model       # 
@@ -435,6 +455,9 @@ class GueantCSMC(FeynmanKac):
         eta_0 = m0 + jr.normal(key_eta, shape=(self.N+1, self.D)) @ chol_H0.T
         return z_0, eta_0
 
+    def Mt_rvs(self, params, key, xp, inp):
+        return None
+
     def M0_logpdf(self, params, x0, inp, constant: bool):
         """ Evaluate the initial full-state density """
         return log_p0(params, x0, constant=constant)
@@ -511,6 +534,7 @@ class GueantCSMC(FeynmanKac):
         Q = params["Q"]
         H = params["H"]
         R = params["R"]
+        alpha = params["alpha"]
         psi = params["psi"]
 
         chol_H = jnp.linalg.cholesky(H)
@@ -532,7 +556,7 @@ class GueantCSMC(FeynmanKac):
             key, state[0], state[1],
             M_0, Gamma_0,
             inps, Gamma_t_plus_params,
-            chol_H, chol_R, psi,
+            chol_H, chol_R, alpha, psi,
             N=self.N+1, conditional=conditional,
             **kwargs
         )
