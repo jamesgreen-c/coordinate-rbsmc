@@ -237,13 +237,16 @@ def get_data(
 
 def get_prior_params(key, D, T, steps, phi, log_var):
     m0_key, H_key = jr.split(key)
+    scale = 100
 
     # log half-spread transition matrix
     A = phi * jnp.eye(D)
 
     # mid-YtB initial mean, in percentage-point units
-    scale = 100
-    M0 = scale * jr.uniform(m0_key, shape=(D,), minval=0.5, maxval=1.0)
+    MEAN_M0 = scale * 0.75 * jnp.ones(D)
+    COV_M0 = (scale * 0.1)**2 * jnp.eye(D)
+    M0 = jr.multivariate_normal(m0_key, MEAN_M0, COV_M0)
+    # M0 = scale * jr.uniform(m0_key, shape=(D,), minval=0.5, maxval=1.0)
 
     # covariance parameters
     Q0 = 0.1 * jnp.eye(D)                              # initial uncertainty about log half-spreads
@@ -272,6 +275,8 @@ def get_prior_params(key, D, T, steps, phi, log_var):
 
     params = {
         "A": A,
+        "mean_m0": MEAN_M0,
+        "cov_m0": COV_M0,
         "m0": M0,
         "Q0": Q0,
         "H0": H0,
