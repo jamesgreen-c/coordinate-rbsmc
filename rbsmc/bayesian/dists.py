@@ -10,6 +10,8 @@ import jax.random as jr
 from jax import Array
 from jax.scipy.linalg import solve_triangular
 
+from rbsmc.utils.mvn import mvn_logpdf
+
 
 class DistParam(ABC):
     @property
@@ -19,6 +21,10 @@ class DistParam(ABC):
 
     @abstractmethod
     def sample(self, key: Array, shape: Sequence[int] = ()) -> Array:
+        pass
+
+    @abstractmethod
+    def log_pdf(self, value: Array):
         pass
 
 
@@ -92,9 +98,14 @@ class GaussianDistParam(DistParam):
     def sample(self, key: Array, shape: Sequence[int] = ()) -> Array:
         return jr.multivariate_normal(key, self.mean, self.cov, shape=shape)
 
+    def log_pdf(self, value: Array):
+        chol = jnp.linalg.cholesky(self.cov)
+        return mvn_logpdf(value, self.mean, chol, constant=True)
+
     def tree_flatten(self):
         return (self.mean, self.cov), None
 
     @classmethod
     def tree_unflatten(cls, aux_data, children):
         return cls(*children)
+    
