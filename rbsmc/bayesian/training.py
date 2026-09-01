@@ -148,12 +148,12 @@ class ParticleGibbs:
         self.replacement_rates = np.empty((total, T), dtype=np.float32,)
 
         self.sample_hist = tree_util.tree_map(
-            lambda hist, x: self._set_host_value(hist, 0, x),
+            lambda hist, x: self._set_hist_value(hist, 0, x),
             self.sample_hist,
             state[0],
         )
         self.param_hist = tree_util.tree_map(
-            lambda hist, x: self._set_host_value(hist, 0, x),
+            lambda hist, x: self._set_hist_value(hist, 0, x),
             self.param_hist,
             params,
         )
@@ -169,12 +169,12 @@ class ParticleGibbs:
         hist_idx = itr + 1
 
         self.sample_hist = tree_util.tree_map(
-            lambda hist, x: self._set_host_value(hist, hist_idx, x),
+            lambda hist, x: self._set_hist_value(hist, hist_idx, x),
             self.sample_hist,
             state[0],
         )
         self.param_hist = tree_util.tree_map(
-            lambda hist, x: self._set_host_value(hist, hist_idx, x),
+            lambda hist, x: self._set_hist_value(hist, hist_idx, x),
             self.param_hist,
             params,
         )
@@ -182,7 +182,7 @@ class ParticleGibbs:
         self.replacement_rates[itr] = replacement_rates
 
     @staticmethod
-    def _set_host_value(hist, idx, value):
+    def _set_hist_value(hist, idx, value):
         hist[idx] = np.asarray(value)
         return hist
 
