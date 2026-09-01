@@ -111,6 +111,10 @@ def kernel(
         # Step 1: propose z_t candidates from the exact z transition
         z_t_hat = z_transition_rvs(key_z_t, x_t_m_1, M_t_params)
 
+        # keep z_t from reference trajectory during resample
+        if conditional:
+            z_t_hat = z_t_hat.at[b_star_t_m_1].set(x_star_t[0])
+
         # Step 2: compute auxiliary/predictive weights before drawing eta_t
         _, _, dt, obs_t = M_t_params
         _, eta_t_m_1 = x_t_m_1
@@ -123,7 +127,7 @@ def kernel(
         x_t_m_1 = tree_map(lambda x: jnp.take(x, A_t, axis=0), x_t_m_1)
         z_t = jnp.take(z_t_hat, A_t, axis=0)
 
-        # Step 4--6: draw eta_t from the conditional guided proposal
+        # Step 4-6: draw eta_t from the conditional guided proposal
         eta_t_m_1 = x_t_m_1[1]
         eta_t = mid_price_proposal(key_eta_t, z_t, eta_t_m_1, obs_t, alpha, psi, chol_Q_eta, chol_R, dt)
         x_t = (z_t, eta_t)
@@ -140,7 +144,7 @@ def kernel(
         return next_carry, save
 
     inputs = (M_t_params, Gamma_params, tree_map(lambda x: x[1:], x_star), b_star[:-1], b_star[1:], keys_forward)
-    _, (log_ws, As, xs) = jax.lax.scan(body, (log_w0, x0), inputs)
+    _, (log_ws, As, xs, diagnostics) = jax.lax.scan(body, (log_w0, x0), inputs)
 
     log_ws = jnp.insert(log_ws, 0, log_w0, axis=0)
     xs = tree_map(lambda xs_, x0_: jnp.insert(xs_, 0, x0_, axis=0), xs, x0)
@@ -217,7 +221,10 @@ def predictive_obs_logpdf(
     def case_4():
         log_hi = norm.logcdf((obs_value + alpha_i) - eta_prev_i, loc=0.0, scale=std_tilde)
         log_lo = norm.logcdf((obs_value - alpha_i) - eta_prev_i, loc=0.0, scale=std_tilde)
-        return _logdiffexp(log_hi, log_lo)
+        val = _logdiffexp(log_hi, log_lo)
+
+        tiny = jnp.log(jnp.finfo(val.dtype).tiny)
+        return jnp.nan_to_num(val, nan=tiny, neginf=tiny)
 
     return jax.lax.switch(event_type, [case_0, case_1, case_2, case_3, case_4])
 
@@ -260,6 +267,7 @@ def mid_price_proposal(
     var_eps = _obs_var(chol_R, bond_idx)
     var_tilde = var_i * dt + var_eps
     std_tilde = jnp.sqrt(var_tilde)
+    # jax.debug.print("std_tilde: {}", std_tilde)
 
     # extraction
     eta_prev_i = eta_prev[:, bond_idx]
@@ -267,21 +275,29 @@ def mid_price_proposal(
     half_spread = psi[bond_idx] * jnp.exp(z[:, bond_idx])
 
     standardise = lambda x: (x - eta_prev_i) / std_tilde
-
     # eta_i_tilde = eta_i + eps_i
+
     case_0 = lambda: obs_value + half_spread
     case_1 = lambda: obs_value - half_spread
-    case_2 = lambda: eta_prev_i + std_tilde * jr.truncated_normal(
+    # case_2 = lambda: eta_prev_i + std_tilde * jr.truncated_normal(
+    #     key_tilde,
+    #     lower=jnp.minimum(standardise(obs_value + half_spread), TRUNC_BOUND),
+    #     upper=jnp.inf,
+    #     shape=(N,),
+    # )
+    # case_3 = lambda: eta_prev_i + std_tilde * jr.truncated_normal(
+    #     key_tilde,
+    #     lower=-jnp.inf,
+    #     upper=jnp.maximum(standardise(obs_value - half_spread), -TRUNC_BOUND),
+    #     shape=(N,),
+    # )
+    case_2 = lambda: eta_prev_i + std_tilde * lower_truncated_normal(
         key_tilde,
-        lower=standardise(obs_value + half_spread),
-        upper=jnp.inf,
-        shape=(N,),
+        standardise(obs_value + half_spread),
     )
-    case_3 = lambda: eta_prev_i + std_tilde * jr.truncated_normal(
+    case_3 = lambda: eta_prev_i - std_tilde * lower_truncated_normal(
         key_tilde,
-        lower=-jnp.inf,
-        upper=standardise(obs_value - half_spread),
-        shape=(N,),
+        -standardise(obs_value - half_spread),
     )
     case_4 = lambda: eta_prev_i + std_tilde * jr.truncated_normal(
         key_tilde,
@@ -345,3 +361,56 @@ def Mt_tilde_logpdf(
     log_pred = predictive_obs_logpdf(z_t, eta_t_m_1, obs_t, alpha, psi, chol_Q_eta, chol_R, dt)
 
     return log_q_z + log_prior_eta + log_g - log_pred
+
+
+def right_tail_truncated_normal(key, lower):
+    """
+    Sample N(0, 1) conditional on X >= lower, for lower > 0.
+    Robert's exponential-rejection sampler.
+    """
+    lower = jnp.asarray(lower)
+    alpha = 0.5 * (lower + jnp.sqrt(lower ** 2 + 4.0))
+
+    def cond(carry):
+        _, accepted, _ = carry
+        return jnp.any(~accepted)
+
+    def body(carry):
+        key, accepted, samples = carry
+        key, key_x, key_u = jr.split(key, 3)
+
+        candidate = lower + jr.exponential(key_x, lower.shape) / alpha
+        accept = jnp.log(jr.uniform(key_u, lower.shape)) <= -0.5 * (candidate - alpha) ** 2
+        accept = (~accepted) & accept
+
+        samples = jnp.where(accept, candidate, samples)
+        return key, accepted | accept, samples
+
+    _, _, samples = jax.lax.while_loop(
+        cond,
+        body,
+        (key, jnp.zeros(lower.shape, dtype=bool), jnp.zeros_like(lower)),
+    )
+    return samples
+
+
+def lower_truncated_normal(key, lower, trunc_bound=5.0):
+    """
+    Sample N(0, 1) conditional on X >= lower.
+    """
+    key_direct, key_tail = jr.split(key)
+
+    # Keep JAX's inverse-CDF sampler away from its unstable far tail.
+    direct = jr.truncated_normal(
+        key_direct,
+        lower=jnp.minimum(lower, trunc_bound),
+        upper=jnp.inf,
+        shape=lower.shape,
+    )
+
+    tail = right_tail_truncated_normal(
+        key_tail,
+        jnp.maximum(lower, trunc_bound),
+    )
+
+    return jnp.where(lower > trunc_bound, tail, direct)
