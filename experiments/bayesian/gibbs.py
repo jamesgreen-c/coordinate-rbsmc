@@ -11,7 +11,7 @@ from rbsmc.bayesian.dists import GaussianNatParam
 ##########################
 #     horseshoe prior    #
 ##########################
-def make_blocks(D: int):
+def make_blocks(D: int, infer_H: bool, infer_m0: bool):
     """
     
     Parameters
@@ -22,7 +22,13 @@ def make_blocks(D: int):
     H_block = _construct_H_block(D)
     m0_block = _construct_m0_block(D)
 
-    return (H_block, m0_block, )
+    blocks = []
+    if infer_H:
+        blocks.append(H_block)
+    if infer_m0:
+        blocks.append(m0_block)
+    return blocks
+    # return (H_block, ) #  m0_block, )
 
 
 def _construct_m0_block(D):

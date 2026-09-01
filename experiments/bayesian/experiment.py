@@ -55,7 +55,16 @@ parser.add_argument("--debug", action='store_true')
 parser.add_argument('--no-debug', dest='debug', action='store_false')
 parser.set_defaults(debug=False)
 
+parser.add_argument("--infer-H", dest="infer_H", action='store_true')
+parser.add_argument("--no-infer-H", dest="infer_H", action='store_false')
+parser.set_defaults(infer_H=True)
+
+parser.add_argument("--infer-m0", dest="infer_m0", action='store_true')
+parser.add_argument("--no-infer-m0", dest="infer_m0", action='store_false')
+parser.set_defaults(infer_m0=True)
+
 args = parser.parse_args()
+
 
 # RNG
 KEY = PRNGKey(0)  # same every time
@@ -69,8 +78,8 @@ PRIOR_PARAMS, DTs = get_prior_params(INIT_KEY,
                                      args.phi, 
                                      args.log_var)
 
+
 # SMC CONFIG
-# csmc = CSMC(N=args.N, D=args.D, dts=DTs)
 kernel = KernelType(args.kernel).kernel_maker(N=args.N, D=args.D, dts=DTs)
 kwargs = dict(resampling_func=killing, backward=args.backward, ancestor_move_func=force_move) 
 KERNEL = SMC(
@@ -80,7 +89,7 @@ KERNEL = SMC(
 )
 
 # GIBBS CONFIG
-BLOCKS = make_blocks(D=args.D)
+BLOCKS = make_blocks(D=args.D, infer_H=args.infer_H, infer_m0=args.infer_m0)
 GIBBS = Gibbs(blocks=BLOCKS)
 
 # INFERENCE CONFIG
@@ -90,10 +99,12 @@ SAMPLER = ParticleGibbs(smc=KERNEL, gibbs=GIBBS, config=CONFIG)
 print(f"""
 ========================
 Configuration
-    - D:       {args.D}
-    - T:       {args.T}
-    - steps:   {args.steps}
-    - kernel:  {kernel.name}
+    - D:         {args.D}
+    - T:         {args.T}
+    - steps:     {args.steps}
+    - kernel:    {kernel.name}
+    - infer H:   {args.infer_H}
+    - infer m0:  {args.infer_m0}
 ========================
 """)
 
@@ -120,7 +131,7 @@ if __name__ == "__main__":
     if not os.path.exists("results"):
         os.mkdir("results")
 
-    experiment_name = "kernel={},D={},T={},steps={},phi={},log-var={},N={},samples={},burnin={},conditional={},seed={}"
+    experiment_name = "kernel={},D={},T={},steps={},phi={},log-var={},N={},s={},b={},inf-H={},inf-m0={},cond={},seed={}"
     experiment_name = experiment_name.format(
         kernel.name,
         args.D,
@@ -131,6 +142,8 @@ if __name__ == "__main__":
         args.N,
         args.samples,
         args.burnin,
+        args.infer_H,
+        args.infer_m0,
         args.conditional,
         args.seed,
     )
