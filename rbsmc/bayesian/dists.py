@@ -11,7 +11,7 @@ from jax import Array
 from jax.scipy.linalg import solve_triangular
 
 from rbsmc.utils.mvn import mvn_logpdf
-
+from rbsmc.utils.inverse_gamma import inverse_gamma, logpdf as ig_logpdf
 
 class DistParam(ABC):
     @property
@@ -108,4 +108,58 @@ class GaussianDistParam(DistParam):
     @classmethod
     def tree_unflatten(cls, aux_data, children):
         return cls(*children)
+
+
+@jax.tree_util.register_pytree_node_class
+@dataclass(frozen=True)
+class InverseGammaNatParam(NatParam):
+    alpha: Array
+    beta: Array
+
+    def _fields(self) -> Mapping[str, Array]:
+        return {"alpha": self.alpha, "beta": self.beta}
+
+    @classmethod
+    def _from_fields(cls, fields: Mapping[str, Array]) -> InverseGammaNatParam:
+        return cls(fields["alpha"], fields["beta"])
+
+    @classmethod
+    def from_gaussian(cls, value: Array, mean: Array | float) -> InverseGammaNatParam:
+        """ For conjugate inference """
+        residual = value - mean
+        return cls(alpha=jnp.ones_like(residual) / 2, beta=residual**2 / 2)
+
+    @property
+    def dist_param(self) -> InverseGammaDistParam:
+        return InverseGammaDistParam(self.alpha, self.beta)
+
+    def tree_flatten(self):
+        return (self.alpha, self.beta), None
+
+    @classmethod
+    def tree_unflatten(cls, aux_data, children):
+        return cls(*children)
+
+
+@jax.tree_util.register_pytree_node_class
+@dataclass(frozen=True)
+class InverseGammaDistParam(DistParam):
+    alpha: Array
+    beta: Array
+
+    @property
+    def nat_param(self) -> InverseGammaNatParam:
+        return InverseGammaNatParam(self.alpha, self.beta)
+
+    def sample(self, key: Array, shape: Sequence[int] = ()) -> Array:
+        return inverse_gamma(key, self.alpha, self.beta)
+
+    def log_pdf(self, value: Array):
+        return ig_logpdf(value, self.alpha, self.beta)
+
+    def tree_flatten(self):
+            return (self.alpha, self.beta), None
     
+    @classmethod
+    def tree_unflatten(cls, aux_data, children):
+        return cls(*children)
