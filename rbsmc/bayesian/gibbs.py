@@ -51,7 +51,7 @@ class ConjugateBlock(GibbsBlock):
 
     def init(self, key: PRNGKey, hyperparams: dict | None):
         prior = self.prior(hyperparams) if callable(self.prior) else self.prior
-        return {self.name: prior.dist_param.sample(key, self.shape)}
+        return self.unpack(prior.dist_param.sample(key, self.shape))
 
     def sample(self, key: PRNGKey, context: GibbsContext) -> dict[str, Any]:
         prior = self.prior(context.params) if callable(self.prior) else self.prior

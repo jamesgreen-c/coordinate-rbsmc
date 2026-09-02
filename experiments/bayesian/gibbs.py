@@ -6,7 +6,7 @@ from jax.scipy.linalg import solve
 
 from rbsmc.bayesian.gibbs import ConjugateBlock, ConditionalBlock, GibbsContext
 from rbsmc.utils.horseshoe import Horseshoe
-from rbsmc.bayesian.dists import GaussianNatParam
+from rbsmc.bayesian.dists import GaussianNatParam, InverseGammaNatParam
 
 ##########################
 #     horseshoe prior    #
@@ -43,7 +43,7 @@ def _construct_m0_block(D):
 
     def _likelihood(context: GibbsContext):
         """
-        Construct the likelihood p(eta_1 | m_1, H_1) as a Gaussian function of m_1.
+        Construct the likelihood p(eta_0 | m_0, H_0) as a Gaussian function of m_0.
         """
         H0 = context.params["H0"]
         eta1 = context.trajectory[1][0]     # (zs, etas)
@@ -60,6 +60,33 @@ def _construct_m0_block(D):
         likelihood=_likelihood,
         unpack=_unpack
     )
+
+
+def _construct_H0_block(D):
+
+    def _prior(params: dict):
+        alpha = jnp.broadcast_to(jnp.asarray(params["alpha"]), (D,))
+        beta = jnp.broadcast_to(jnp.asarray(params["beta"]), (D,))
+        return InverseGammaNatParam(alpha=alpha, beta=beta)
+
+    def _likelihood(context: GibbsContext):
+        """
+        Construct the likelihood p(eta_0 | m_0, H_0) as a InverseGamma function of H_0
+        """
+        m0 = context.params["m0"]
+        eta1 = context.trajectory[1][0]
+        return InverseGammaNatParam.from_gaussian(value=eta1, mean=m0)
+
+    def _unpack(H0_diag: Array):
+        return {"H0": jnp.diag(H0_diag)}
+
+    return ConjugateBlock(
+        name="H0",
+        prior=_prior,
+        likelihood=_likelihood,
+        unpack=_unpack
+    )
+
 
 def _construct_H_block(D):
 
