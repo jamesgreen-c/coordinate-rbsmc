@@ -37,6 +37,10 @@ parser.add_argument("--infer-m0", dest="infer_m0", action='store_true')
 parser.add_argument("--no-infer-m0", dest="infer_m0", action='store_false')
 parser.set_defaults(infer_m0=True)
 
+parser.add_argument("--infer-H0", dest="infer_H0", action='store_true')
+parser.add_argument("--no-infer-H0", dest="infer_H0", action='store_false')
+parser.set_defaults(infer_H0=True)
+
 args = parser.parse_args()
 
 
@@ -158,23 +162,39 @@ def plot_covariance_diagnostics(name, history, truth, posterior_slice, plotpath)
 #     args.samples, args.burnin, args.conditional, args.seed,
 # )
 
-experiment_name = "kernel={},D={},T={},steps={},phi={},log-var={},N={},s={},b={},inf-H={},inf-m0={},cond={},seed={}"
+# experiment_name = "kernel={},D={},T={},steps={},phi={},log-var={},N={},s={},b={},inf-H={},inf-m0={},cond={},seed={}"
+# experiment_name = experiment_name.format(
+#     args.kernel, 
+#     args.D, 
+#     args.T, 
+#     args.steps, 
+#     args.phi, 
+#     args.log_var, 
+#     args.N,
+#     args.samples, 
+#     args.burnin,
+#     args.infer_H,
+#     args.infer_m0,
+#     args.conditional, 
+#     args.seed
+# )
+experiment_name = "kernel={},D={},T={},steps={},phi={},log-var={},N={},s={},b={},inf-H={},inf-m0={},inf-H0={},cond={},seed={}"
 experiment_name = experiment_name.format(
-    args.kernel, 
-    args.D, 
-    args.T, 
-    args.steps, 
-    args.phi, 
-    args.log_var, 
+    args.kernel,
+    args.D,
+    args.T,
+    args.steps,
+    args.phi,
+    args.log_var,
     args.N,
-    args.samples, 
+    args.samples,
     args.burnin,
     args.infer_H,
     args.infer_m0,
-    args.conditional, 
-    args.seed
+    args.infer_H0,
+    args.conditional,
+    args.seed,
 )
-
 
 dirpath = f"results/{experiment_name}"
 datapath = f"{dirpath}/data.npz"

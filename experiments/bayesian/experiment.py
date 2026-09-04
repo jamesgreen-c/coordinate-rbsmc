@@ -63,6 +63,10 @@ parser.add_argument("--infer-m0", dest="infer_m0", action='store_true')
 parser.add_argument("--no-infer-m0", dest="infer_m0", action='store_false')
 parser.set_defaults(infer_m0=True)
 
+parser.add_argument("--infer-H0", dest="infer_H0", action='store_true')
+parser.add_argument("--no-infer-H0", dest="infer_H0", action='store_false')
+parser.set_defaults(infer_H0=True)
+
 args = parser.parse_args()
 
 
@@ -89,7 +93,7 @@ KERNEL = SMC(
 )
 
 # GIBBS CONFIG
-BLOCKS = make_blocks(D=args.D, infer_H=args.infer_H, infer_m0=args.infer_m0)
+BLOCKS = make_blocks(D=args.D, infer_H=args.infer_H, infer_m0=args.infer_m0, infer_H0=args.infer_H0)
 GIBBS = Gibbs(blocks=BLOCKS)
 
 # INFERENCE CONFIG
@@ -105,6 +109,7 @@ Configuration
     - kernel:    {kernel.name}
     - infer H:   {args.infer_H}
     - infer m0:  {args.infer_m0}
+    - infer H0:  {args.infer_H0}
 ========================
 """)
 
@@ -131,7 +136,7 @@ if __name__ == "__main__":
     if not os.path.exists("results"):
         os.mkdir("results")
 
-    experiment_name = "kernel={},D={},T={},steps={},phi={},log-var={},N={},s={},b={},inf-H={},inf-m0={},cond={},seed={}"
+    experiment_name = "kernel={},D={},T={},steps={},phi={},log-var={},N={},s={},b={},inf-H={},inf-m0={},inf-H0={},cond={},seed={}"
     experiment_name = experiment_name.format(
         kernel.name,
         args.D,
@@ -144,6 +149,7 @@ if __name__ == "__main__":
         args.burnin,
         args.infer_H,
         args.infer_m0,
+        args.infer_H0,
         args.conditional,
         args.seed,
     )

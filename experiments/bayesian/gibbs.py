@@ -11,7 +11,7 @@ from rbsmc.bayesian.dists import GaussianNatParam, InverseGammaNatParam
 ##########################
 #     horseshoe prior    #
 ##########################
-def make_blocks(D: int, infer_H: bool, infer_m0: bool):
+def make_blocks(D: int, infer_H: bool, infer_m0: bool, infer_H0: bool):
     """
     
     Parameters
@@ -21,12 +21,15 @@ def make_blocks(D: int, infer_H: bool, infer_m0: bool):
 
     H_block = _construct_H_block(D)
     m0_block = _construct_m0_block(D)
+    H0_block = _construct_H0_block(D)
 
     blocks = []
     if infer_H:
         blocks.append(H_block)
     if infer_m0:
         blocks.append(m0_block)
+    if infer_H0:
+        blocks.append(H0_block)
     return blocks
     # return (H_block, ) #  m0_block, )
 
@@ -65,8 +68,8 @@ def _construct_m0_block(D):
 def _construct_H0_block(D):
 
     def _prior(params: dict):
-        alpha = jnp.broadcast_to(jnp.asarray(params["alpha"]), (D,))
-        beta = jnp.broadcast_to(jnp.asarray(params["beta"]), (D,))
+        alpha = jnp.broadcast_to(jnp.asarray(params["concentration"]), (D,))
+        beta = jnp.broadcast_to(jnp.asarray(params["scale"]), (D,))
         return InverseGammaNatParam(alpha=alpha, beta=beta)
 
     def _likelihood(context: GibbsContext):

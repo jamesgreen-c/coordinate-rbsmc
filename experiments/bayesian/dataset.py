@@ -22,36 +22,6 @@ class CorporateBondDataset(Dataset):
         self.stds = None
         super().__init__(**kwargs)
 
-    # override standardisation
-    # @property
-    # def standardised_data(self):
-    #     """
-    #     Standardise each observation using the mean and standard deviation
-    #     of the observations belonging to the corresponding bond.
-    #     """
-    #     obs_values, bond_idxs, event_types = self.data
-
-    #     counts = jnp.bincount(bond_idxs, length=self.D)
-
-    #     if bool(jnp.any(counts == 0)):
-    #         missing = jnp.where(counts == 0)[0]
-    #         raise ValueError(f"Cannot standardise bonds with no observations: {missing}")
-
-    #     sums = jnp.zeros(self.D, dtype=obs_values.dtype).at[bond_idxs].add(obs_values)
-    #     self.means = sums / counts
-
-    #     centred_obs = obs_values - self.means[bond_idxs]
-    #     squared_sums = jnp.zeros(self.D, dtype=obs_values.dtype).at[bond_idxs].add(centred_obs**2)
-    #     self.stds = jnp.sqrt(squared_sums / counts)
-
-    #     if bool(jnp.any(self.stds == 0)):
-    #         constant = jnp.where(self.stds == 0)[0]
-    #         raise ValueError(f"Cannot standardise bonds with zero observation variance: {constant}")
-
-    #     std_obs_values = centred_obs / self.stds[bond_idxs]
-
-    #     return std_obs_values, bond_idxs, event_types
-
     @property
     def standardised_data(self):
         """
@@ -142,6 +112,7 @@ class CorporateBondDataset(Dataset):
         # extract
         MEAN_M0 = self.params["mean_m0"]
         COV_M0 = self.params["cov_m0"]
+        SCALE = self.params["scale"]
         M0 = self.params["m0"]
         H0 = self.params["H0"]
         H = self.params["H"]
@@ -154,7 +125,11 @@ class CorporateBondDataset(Dataset):
         COV_M0 = inv_stds[:, None] * COV_M0 * inv_stds[None, :]
         M0 = inv_stds * (M0 - self.means)
 
+        # SCALE = SCALE / self.stds
+        SCALE = SCALE / (self.stds**2)
+
         H0 = inv_stds[:, None] * H0 * inv_stds[None, :]
+
         H = inv_stds[:, None] * H * inv_stds[None, :]
         R = inv_stds[:, None] * R * inv_stds[None, :]
         PSI = PSI / self.stds
@@ -165,6 +140,7 @@ class CorporateBondDataset(Dataset):
             "mean_m0": MEAN_M0,
             "cov_m0": COV_M0,
             "m0": M0,
+            "scale": SCALE,
             "H0": H0,
             "H": H,
             "R": R,
@@ -172,3 +148,35 @@ class CorporateBondDataset(Dataset):
             "alpha": ALPHA,
         }
         return standardised_params
+
+
+    
+    # override standardisation
+    # @property
+    # def standardised_data(self):
+    #     """
+    #     Standardise each observation using the mean and standard deviation
+    #     of the observations belonging to the corresponding bond.
+    #     """
+    #     obs_values, bond_idxs, event_types = self.data
+
+    #     counts = jnp.bincount(bond_idxs, length=self.D)
+
+    #     if bool(jnp.any(counts == 0)):
+    #         missing = jnp.where(counts == 0)[0]
+    #         raise ValueError(f"Cannot standardise bonds with no observations: {missing}")
+
+    #     sums = jnp.zeros(self.D, dtype=obs_values.dtype).at[bond_idxs].add(obs_values)
+    #     self.means = sums / counts
+
+    #     centred_obs = obs_values - self.means[bond_idxs]
+    #     squared_sums = jnp.zeros(self.D, dtype=obs_values.dtype).at[bond_idxs].add(centred_obs**2)
+    #     self.stds = jnp.sqrt(squared_sums / counts)
+
+    #     if bool(jnp.any(self.stds == 0)):
+    #         constant = jnp.where(self.stds == 0)[0]
+    #         raise ValueError(f"Cannot standardise bonds with zero observation variance: {constant}")
+
+    #     std_obs_values = centred_obs / self.stds[bond_idxs]
+
+    #     return std_obs_values, bond_idxs, event_types

@@ -12,7 +12,7 @@ from experiments.bayesian.utils import (ou_diag_transition, _diag_or_vector_at)
 from experiments.bayesian.dataset import CorporateBondDataset
 
 from rbsmc.utils.iw import InverseWhishart
-
+from rbsmc.utils.inverse_gamma import inverse_gamma
 
 ##############################
 #       data functions       # 
@@ -236,7 +236,7 @@ def get_data(
 #     return params, DTs
 
 def get_prior_params(key, D, T, steps, phi, log_var):
-    m0_key, H_key = jr.split(key)
+    m0_key, H_key, H0_key = jr.split(key, 3)
     scale = 100
 
     # log half-spread transition matrix
@@ -251,7 +251,12 @@ def get_prior_params(key, D, T, steps, phi, log_var):
     # covariance parameters
     Q0 = 0.1 * jnp.eye(D)                              # initial uncertainty about log half-spreads
     Q = 0.1 * jnp.eye(D)                               # daily log half-spread diffusion covariance
-    H0 = (scale * 0.01)**2 * jnp.eye(D)                # initial uncertainty about the mid-YtB
+
+    H0_SCALE = scale * 0.01 * jnp.ones(D)
+    CONCENTRATION = 2 * jnp.ones(D)
+    H0 = jax.vmap(lambda _k, _c, _s: inverse_gamma(_k, _c, _s))(jr.split(H0_key, D), CONCENTRATION, H0_SCALE)
+    H0 = jnp.diag(H0)
+    # H0 = (scale * 0.01)**2 * jnp.eye(D)                # initial uncertainty about the mid-YtB
     R = (scale * 0.00025)**2 * jnp.eye(D)               # observation-noise standard deviation approximately 0.2–0.3 bp
 
     if D == 3:
@@ -279,6 +284,8 @@ def get_prior_params(key, D, T, steps, phi, log_var):
         "cov_m0": COV_M0,
         "m0": M0,
         "Q0": Q0,
+        "scale": H0_SCALE,
+        "concentration": CONCENTRATION,
         "H0": H0,
         "Q": Q,
         "H": H,
