@@ -144,7 +144,7 @@ def kernel(
         return next_carry, save
 
     inputs = (M_t_params, Gamma_params, tree_map(lambda x: x[1:], x_star), b_star[:-1], b_star[1:], keys_forward)
-    _, (log_ws, As, xs, diagnostics) = jax.lax.scan(body, (log_w0, x0), inputs)
+    _, (log_ws, As, xs) = jax.lax.scan(body, (log_w0, x0), inputs)
 
     log_ws = jnp.insert(log_ws, 0, log_w0, axis=0)
     xs = tree_map(lambda xs_, x0_: jnp.insert(xs_, 0, x0_, axis=0), xs, x0)
