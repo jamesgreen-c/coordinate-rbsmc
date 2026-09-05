@@ -178,14 +178,13 @@ def plot_covariance_diagnostics(name, history, truth, posterior_slice, plotpath)
 #     args.conditional, 
 #     args.seed
 # )
-experiment_name = "kernel={},D={},T={},steps={},phi={},log-var={},N={},s={},b={},inf-H={},inf-m0={},inf-H0={},cond={},seed={}"
+experiment_name = "kernel={},D={},T={},steps={},phi={},N={},s={},b={},inf-H={},inf-m0={},inf-H0={},cond={},seed={}"
 experiment_name = experiment_name.format(
     args.kernel,
     args.D,
     args.T,
     args.steps,
     args.phi,
-    args.log_var,
     args.N,
     args.samples,
     args.burnin,

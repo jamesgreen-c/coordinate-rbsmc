@@ -110,9 +110,9 @@ class CorporateBondDataset(Dataset):
         inv_stds = 1 / self.stds
 
         # extract
-        MEAN_M0 = self.params["mean_m0"]
-        COV_M0 = self.params["cov_m0"]
-        SCALE = self.params["scale"]
+        # MEAN_M0 = self.params["mean_m0"]
+        # COV_M0 = self.params["cov_m0"]
+        # SCALE = self.params["scale"]
         M0 = self.params["m0"]
         H0 = self.params["H0"]
         H = self.params["H"]
@@ -121,12 +121,12 @@ class CorporateBondDataset(Dataset):
         ALPHA = self.params["alpha"]
 
         # standardise
-        MEAN_M0 = inv_stds * (MEAN_M0 - self.means)
-        COV_M0 = inv_stds[:, None] * COV_M0 * inv_stds[None, :]
+        # MEAN_M0 = inv_stds * (MEAN_M0 - self.means)
+        # COV_M0 = inv_stds[:, None] * COV_M0 * inv_stds[None, :]
         M0 = inv_stds * (M0 - self.means)
 
         # SCALE = SCALE / self.stds
-        SCALE = SCALE / (self.stds**2)
+        # SCALE = SCALE / (self.stds**2)
 
         H0 = inv_stds[:, None] * H0 * inv_stds[None, :]
 
@@ -137,10 +137,10 @@ class CorporateBondDataset(Dataset):
         
         standardised_params = {
             **self.params,
-            "mean_m0": MEAN_M0,
-            "cov_m0": COV_M0,
+            # "mean_m0": MEAN_M0,
+            # "cov_m0": COV_M0,
+            # "scale": SCALE,
             "m0": M0,
-            "scale": SCALE,
             "H0": H0,
             "H": H,
             "R": R,

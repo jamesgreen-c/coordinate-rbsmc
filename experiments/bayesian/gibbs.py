@@ -21,6 +21,7 @@ def make_blocks(D: int, infer_H: bool, infer_m0: bool, infer_H0: bool):
 
     H_block = _construct_H_block(D)
     m0_block = _construct_m0_block(D)
+    H0_xi_block = _construct_auxiliary_H0_block(D)
     H0_block = _construct_H0_block(D)
 
     blocks = []
@@ -29,20 +30,17 @@ def make_blocks(D: int, infer_H: bool, infer_m0: bool, infer_H0: bool):
     if infer_m0:
         blocks.append(m0_block)
     if infer_H0:
-        blocks.append(H0_block)
+        blocks.extend((H0_xi_block, H0_block))
     return blocks
-    # return (H_block, ) #  m0_block, )
 
 
-def _construct_m0_block(D):
+def _construct_m0_block(D, mean=0.5, variance=1.0):
 
-    def _prior(params: dict):
-        """
-        """
-        mean_m0, cov_m0 = params["mean_m0"], params["cov_m0"]
-        prec = solve(cov_m0, jnp.eye(D))
-        prec_mean = prec @ mean_m0
-        return GaussianNatParam(precision=prec, precision_mean=prec_mean)
+    # prior specification
+    mean = jnp.broadcast_to(jnp.asarray(mean), (D,))
+    covariance = variance * jnp.eye(D)
+    precision = solve(covariance, jnp.eye(D))
+    _prior = GaussianNatParam(precision=precision, precision_mean=precision @ mean)
 
     def _likelihood(context: GibbsContext):
         """
@@ -65,35 +63,89 @@ def _construct_m0_block(D):
     )
 
 
-def _construct_H0_block(D):
+def _construct_auxiliary_H0_block(D, scale=1.0):
 
-    def _prior(params: dict):
-        alpha = jnp.broadcast_to(jnp.asarray(params["concentration"]), (D,))
-        beta = jnp.broadcast_to(jnp.asarray(params["scale"]), (D,))
-        return InverseGammaNatParam(alpha=alpha, beta=beta)
+    alpha=jnp.full((D,), 0.5)
+    beta=jnp.full((D,), 1 / scale**2)
+    _prior = InverseGammaNatParam(alpha_plus_one=alpha + 1, beta=beta)
 
     def _likelihood(context: GibbsContext):
         """
-        Construct the likelihood p(eta_0 | m_0, H_0) as a InverseGamma function of H_0
+        Construct p(H0 | xi) as an inverse-Gamma function of xi.
+        """
+        H0_diag = jnp.diag(context.params["H0"])
+        alpha = jnp.full((D,), -0.5)
+        return InverseGammaNatParam(alpha_plus_one=alpha + 1, beta=1 / H0_diag)
+
+    def _unpack(sample: Array):
+        return {"H0_xi": sample}
+
+    return ConjugateBlock(
+        name="H0_xi",
+        prior=_prior,
+        likelihood=_likelihood,
+        unpack=_unpack,
+    )
+
+
+def _construct_H0_block(D):
+
+    def _prior(params: dict):
+        """
+        H0_d | xi_d ~ InvGamma(1 / 2, 1 / xi_d).
+        """
+        xi = params["H0_xi"]
+        alpha = jnp.full((D,), 0.5)
+        return InverseGammaNatParam(alpha_plus_one=alpha + 1, beta=1 / xi)
+
+    def _likelihood(context: GibbsContext):
+        """
+        Construct p(eta_1 | m_0, H_0) as an inverse-Gamma function of the diagonal entries of H_0.
         """
         m0 = context.params["m0"]
         eta1 = context.trajectory[1][0]
         return InverseGammaNatParam.from_gaussian(value=eta1, mean=m0)
 
-    def _unpack(H0_diag: Array):
-        return {"H0": jnp.diag(H0_diag)}
+    def _unpack(sample: Array):
+        return {"H0": jnp.diag(sample)}
 
     return ConjugateBlock(
         name="H0",
         prior=_prior,
         likelihood=_likelihood,
-        unpack=_unpack
+        unpack=_unpack,
     )
+
+
+# def _construct_H0_block(D, concentration=1.0, scale=0.1):
+#     # TODO change to be 2 separate blocks using half-cauchy auxiliary prior
+
+#     alpha = jnp.full((D,), concentration)
+#     beta = jnp.full((D,), scale)
+#     _prior = InverseGammaNatParam(alpha=alpha, beta=beta)
+
+#     def _likelihood(context: GibbsContext):
+#         """
+#         Construct the likelihood p(eta_0 | m_0, H_0) as a InverseGamma function of H_0
+#         """
+#         m0 = context.params["m0"]
+#         eta1 = context.trajectory[1][0]
+#         return InverseGammaNatParam.from_gaussian(value=eta1, mean=m0)
+
+#     def _unpack(H0_diag: Array):
+#         return {"H0": jnp.diag(H0_diag)}
+
+#     return ConjugateBlock(
+#         name="H0",
+#         prior=_prior,
+#         likelihood=_likelihood,
+#         unpack=_unpack
+#     )
 
 
 def _construct_H_block(D):
 
-    def _prior(key: PRNGKey, params: dict):
+    def _initialiser(key: PRNGKey):
         H, beta, llambda, nu, tau, xi = Horseshoe.init(D)
         return {"H": H, "beta": beta, "llambda": llambda, "nu": nu, "tau": tau, "xi": xi}
 
@@ -127,6 +179,6 @@ def _construct_H_block(D):
 
     return ConditionalBlock(
         names=("H", "beta", "llambda", "nu", "tau", "xi",),
-        prior=_prior,
+        initialiser=_initialiser,
         kernel=_kernel
     )

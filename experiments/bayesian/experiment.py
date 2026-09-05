@@ -17,7 +17,7 @@ from rbsmc.bayesian.smc import SMC
 from rbsmc.bayesian.training import ParticleGibbs, Config
 from rbsmc.bayesian.gibbs import Gibbs
 
-from experiments.bayesian.data import get_data, get_prior_params
+from experiments.bayesian.data import get_data, get_model_params
 from experiments.bayesian.kernels import KernelType
 from experiments.bayesian.gibbs import make_blocks
 from experiments.bayesian.utils import print_z_diagnostics
@@ -37,7 +37,6 @@ parser.add_argument("--burnin", type=int, default=500)
 parser.add_argument("--samples", dest="samples", type=int, default=500)
 
 parser.add_argument("--phi", type=float, default=0.1)
-parser.add_argument("--log-var", dest="log_var", type=float, default=0)
 
 parser.add_argument("--seed", dest="seed", type=int, default=1234)
 
@@ -75,12 +74,11 @@ KEY = PRNGKey(0)  # same every time
 INIT_KEY, EXPERIMENT_KEY = jr.split(KEY)
 
 # INIT TRUE PARAMETERS
-PRIOR_PARAMS, DTs = get_prior_params(INIT_KEY, 
+MODEL_PARAMS, DTs = get_model_params(INIT_KEY, 
                                      args.D, 
                                      args.T, 
                                      args.steps, 
-                                     args.phi, 
-                                     args.log_var)
+                                     args.phi)
 
 
 # SMC CONFIG
@@ -117,7 +115,7 @@ def one_experiment(key: PRNGKey):
 
     # generate data
     key, data_key = jr.split(key)
-    dataset = get_data(key=data_key, dim=args.D, dts=DTs, params=PRIOR_PARAMS)
+    dataset = get_data(key=data_key, dim=args.D, dts=DTs, params=MODEL_PARAMS)
     # print_z_diagnostics(dataset)
 
     scaled_dataset = dataset.standardised_data
@@ -136,14 +134,13 @@ if __name__ == "__main__":
     if not os.path.exists("results"):
         os.mkdir("results")
 
-    experiment_name = "kernel={},D={},T={},steps={},phi={},log-var={},N={},s={},b={},inf-H={},inf-m0={},inf-H0={},cond={},seed={}"
+    experiment_name = "kernel={},D={},T={},steps={},phi={},N={},s={},b={},inf-H={},inf-m0={},inf-H0={},cond={},seed={}"
     experiment_name = experiment_name.format(
         kernel.name,
         args.D,
         args.T,
         args.steps,
         args.phi,
-        args.log_var,
         args.N,
         args.samples,
         args.burnin,
@@ -167,7 +164,7 @@ if __name__ == "__main__":
         energies=energies,
         replacement_rates=replacement_rates,
         dataset=dataset,
-        true_params=PRIOR_PARAMS,
+        true_params=MODEL_PARAMS,
         standardisation_means=dataset.means,
         standardisation_scales=dataset.stds,
     )
