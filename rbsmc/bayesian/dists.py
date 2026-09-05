@@ -113,28 +113,31 @@ class GaussianDistParam(DistParam):
 @jax.tree_util.register_pytree_node_class
 @dataclass(frozen=True)
 class InverseGammaNatParam(NatParam):
-    alpha: Array
+    alpha_plus_one: Array
     beta: Array
 
-    def _fields(self) -> Mapping[str, Array]:
-        return {"alpha": self.alpha, "beta": self.beta}
+    def _fields(self):
+        return {"alpha_plus_one": self.alpha_plus_one, "beta": self.beta}
 
     @classmethod
-    def _from_fields(cls, fields: Mapping[str, Array]) -> InverseGammaNatParam:
-        return cls(fields["alpha"], fields["beta"])
-
-    @classmethod
-    def from_gaussian(cls, value: Array, mean: Array | float) -> InverseGammaNatParam:
-        """ For conjugate inference """
-        residual = value - mean
-        return cls(alpha=jnp.ones_like(residual) / 2, beta=residual**2 / 2)
+    def _from_fields(cls, fields):
+        return cls(alpha_plus_one=fields["alpha_plus_one"], beta=fields["beta"])
 
     @property
-    def dist_param(self) -> InverseGammaDistParam:
-        return InverseGammaDistParam(self.alpha, self.beta)
+    def dist_param(self):
+        alpha = self.alpha_plus_one - 1
+        return InverseGammaDistParam(alpha=alpha, beta=self.beta)
+
+    @classmethod
+    def from_gaussian(cls, value, mean):
+        residual = value - mean
+        return cls(
+            alpha_plus_one=jnp.ones_like(residual) / 2,
+            beta=residual**2 / 2,
+        )
 
     def tree_flatten(self):
-        return (self.alpha, self.beta), None
+        return (self.alpha_plus_one, self.beta), None
 
     @classmethod
     def tree_unflatten(cls, aux_data, children):
