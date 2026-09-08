@@ -1,49 +1,61 @@
 import argparse
 import os
-import time
-
-import jax
-import jax.numpy as jnp
 
 import numpy as np
-import tqdm
 
-from experiments.corporate_bonds.kernels import KernelType, get_csmc_kernel
-from experiments.corporate_bonds.model import get_data
+import jax.numpy as jnp
+import jax.random as jr
 
-from rbsmc.utils.common import force_move, barker_move
-from rbsmc.utils.resamplings import killing, multinomial
+import jax
+jax.config.update('jax_enable_x64', True)
 
-# jax.config.update("jax_enable_x64", False)
-# jax.config.update("jax_platform_name", "cpu")
+from jax.random import PRNGKey
 
-# ARGS PARSING
+from copy import deepcopy
+
+from rbsmc.utils.common import force_move
+from rbsmc.utils.resamplings import killing
+from rbsmc.bayesian.smc import SMC
+from rbsmc.bayesian.training import ParticleGibbs, Config
+from rbsmc.bayesian.gibbs import Gibbs
+
+from experiments.corporate_bonds.data import get_data, get_model_params
+from experiments.corporate_bonds.kernels import KernelType
+from experiments.corporate_bonds.gibbs import make_blocks
+from experiments.corporate_bonds.utils import print_z_diagnostics
+from experiments.corporate_bonds.dataset import estimate_params_from_data
+
+
 parser = argparse.ArgumentParser()
 
-parser.add_argument("--T", dest="T", type=int, default=10)
+parser.add_argument("--M", dest="M", type=int, default=1)  # number of chains
+
+parser.add_argument("--T", dest="T", type=int, default=500)
 parser.add_argument("--D", dest="D", type=int, default=1)
-parser.add_argument("--K", dest="K", type=int, default=1)
-parser.add_argument("--M", dest="M", type=int, default=5)
-parser.add_argument("--steps", type=int, default=100)
+parser.add_argument("--steps", type=int, default=499)
 
-parser.add_argument("--independent", action="store_true")
-parser.set_defaults(independent=False)
+parser.add_argument("--kernel", type=int, default=1)
 
-parser.add_argument("--log-var", dest="log_var", type=float, default=0)
-parser.add_argument("--phi", dest="phi", type=float, default=0.8)
+parser.add_argument("--burnin", type=int, default=500)
+parser.add_argument("--samples", dest="samples", type=int, default=500)
 
-parser.add_argument("--kernel", dest="kernel", type=int, default=KernelType.CSMC)
-parser.add_argument("--style", dest="style", type=str, default="bootstrap")
+parser.add_argument("--phi", type=float, default=0.1)
+
+parser.add_argument("--seed", dest="seed", type=int, default=1234)
+
+parser.add_argument("--full-inference", action='store_true')
+parser.add_argument('--no-full-inference', dest='full_inference', action='store_false')
+parser.set_defaults(full_inference=False)
+
+parser.add_argument("--conditional", action="store_true")
+parser.add_argument("--unconditional", dest="conditional", action="store_false")
+parser.set_defaults(conditional=True)
 
 parser.add_argument("--backward", action='store_true')
 parser.add_argument('--no-backward', dest='backward', action='store_false')
 parser.set_defaults(backward=True)
 
-parser.add_argument("--resampling", dest='resampling', type=str, default="multinomial")
-parser.add_argument("--last-step", dest='last_step', type=str, default="barker")
 parser.add_argument("--N", dest="N", type=int, default=31)  # total number of particles is N + 1
-
-parser.add_argument("--seed", dest="seed", type=int, default=1234)
 
 parser.add_argument("--debug", action='store_true')
 parser.add_argument('--no-debug', dest='debug', action='store_false')
@@ -51,161 +63,102 @@ parser.set_defaults(debug=False)
 
 args = parser.parse_args()
 
-kernel_type = KernelType(args.kernel)
+
+# RNG
+KEY = PRNGKey(0)  # same every time
+INIT_KEY, EXPERIMENT_KEY = jr.split(KEY)
+
+# INIT TRUE PARAMETERS
+MODEL_PARAMS, DTs = get_model_params(INIT_KEY,
+                                     args.D,
+                                     args.T,
+                                     args.steps,
+                                     args.phi)
+
+
+# SMC CONFIG
+kernel = KernelType(args.kernel).kernel_maker(N=args.N, D=args.D, dts=DTs)
+kwargs = dict(resampling_func=killing, backward=args.backward, ancestor_move_func=force_move)
+KERNEL = SMC(
+    fk=kernel,
+    conditional=args.conditional,
+    kwargs=kwargs
+)
+
+# GIBBS CONFIG
+BLOCKS = make_blocks(D=args.D, full_inference=args.full_inference)
+GIBBS = Gibbs(blocks=BLOCKS)
+
+# INFERENCE CONFIG
+CONFIG = Config(samples=args.samples, burnin=args.burnin, seed=args.seed)
+SAMPLER = ParticleGibbs(smc=KERNEL, gibbs=GIBBS, config=CONFIG)
 
 print(f"""
-##################################
-#  CORPORATE BOND EXPERIMENT     #
-##################################
-Configuration:
-    - T:         {args.T}
-    - kernel:    {kernel_type.name}
-    - style:     {args.style}
-    - D:         {args.D}
-    - M:         {args.M}
-    - steps:     {args.steps}
+========================
+Configuration
+    - D:                 {args.D}
+    - T:                 {args.T}
+    - steps:             {args.steps}
+    - kernel:            {kernel.name}
+    - full inference:    {args.full_inference}
+========================
 """)
 
-# PARAMETERS
-KEY = jax.random.PRNGKey(args.seed)
-ALL_KEYS = jax.random.split(KEY, args.K + 1)
-WARMUP_KEY = ALL_KEYS[0]
-EXPERIMENT_KEYS = ALL_KEYS[1:]
 
-if args.resampling == "killing":
-    resampling_fn = killing
-elif args.resampling == "multinomial":
-    resampling_fn = multinomial
-else:
-    raise ValueError(f"Unknown resampling {args.resampling}")
+def one_experiment(key: PRNGKey):
 
-if args.last_step == "forced":
-    last_step_fn = force_move
-elif args.last_step == "barker":
-    last_step_fn = barker_move
-else:
-    raise ValueError(f"Unknown last step {args.last_step}")
+    # generate data
+    key, data_key = jr.split(key)
+    dataset = get_data(key=data_key, dim=args.D, dts=DTs, params=MODEL_PARAMS)
+    if not args.full_inference:
+        estimated_params = estimate_params_from_data(dataset=dataset)
 
-# --- dynamics config ---
-A = args.phi * jnp.eye(args.D)
-CHOL_Q0 = 0.1 * jnp.eye(args.D)
-CHOL_H0 = 0.1 * jnp.eye(args.D)
-CHOL_Q = 10 ** (args.log_var / 2) * jnp.eye(args.D)  # independent spreads
+    dataset.params = {**dataset.params, **estimated_params}
+    scaled_dataset = dataset.standardised_data
 
-def make_eta_chol(D, base_vol=0.10, vol_slope=0.40, corr=0.60):
-    vol_eta = base_vol * jnp.linspace(1.0, 1.0 + vol_slope, D)
-    corr_eta = (1.0 - corr) * jnp.eye(D) + corr * jnp.ones((D, D))
-    H = corr_eta * vol_eta[:, None] * vol_eta[None, :]
-    return jnp.linalg.cholesky(H)
+    # run particle Gibbs. Passing prior params uses true params only for those without Gibbs blocks
+    samples, ancestors, params, replacement_rates = SAMPLER.run(scaled_dataset.data, DTs, scaled_dataset.params)
+    return samples, ancestors, params, replacement_rates, SAMPLER.energies, dataset, scaled_dataset, estimated_params
 
-CHOL_H_TRUE = make_eta_chol(args.D)
 
-if args.independent:
-    CHOL_H = 0.1 * jnp.eye(args.D)
-else:
-    CHOL_H = CHOL_H_TRUE
+if __name__ == "__main__":
 
-CHOL_R = 0.1 * jnp.eye(args.D)
-PSI = 0.05 * jnp.ones(args.D)
-ALPHA = 0.10 * jnp.ones(args.D)
+    samples, As, params, replacement_rates, energies, dataset, scaled_dataset, estimated_params = one_experiment(EXPERIMENT_KEY)
 
-DTs = jnp.repeat(args.T / args.steps, args.steps)
+    # save results
+    if not os.path.exists("results"):
+        os.mkdir("results")
 
-# ------- experiment function -------
-
-@(jax.jit if not args.debug else lambda x: x)
-def one_experiment(key):
-    data_key, sample_key = jax.random.split(key)
-
-    true_xs, (ys, indices, obs_types), *_ = get_data(
-        data_key, args.D, DTs, 
-        A, PSI, CHOL_Q0, CHOL_Q, CHOL_H0, CHOL_H_TRUE, CHOL_R, ALPHA,
-        sparsity_factor=5.0
+    experiment_name = "kernel={},D={},T={},steps={},phi={},N={},samples={},burnin={},full-inference={},conditional={},seed={}"
+    experiment_name = experiment_name.format(
+        kernel.name,
+        args.D,
+        args.T,
+        args.steps,
+        args.phi,
+        args.N,
+        args.samples,
+        args.burnin,
+        args.full_inference,
+        args.conditional,
+        args.seed,
     )
 
-    kernel, init, *_ = kernel_type.kernel_maker(
-        ys, indices, obs_types, 
-        ALPHA, PSI, 
-        A, CHOL_Q0, CHOL_Q, CHOL_H0, CHOL_H, CHOL_R,
-        N=args.N, dts=DTs,
-        resampling_func=resampling_fn,
-        backward=args.backward,
-        ancestor_move_func=last_step_fn,
-        style=args.style, 
-        conditional=False
+    dirpath = f"results/{experiment_name}"
+    if not os.path.exists(dirpath):
+        os.mkdir(dirpath)
+
+    datapath = f"{dirpath}/data.npz"
+    np.savez_compressed(
+        datapath,
+        trajectories=samples,
+        ancestors=As,
+        params=params,
+        energies=energies,
+        replacement_rates=replacement_rates,
+        dataset=dataset,
+        true_params=MODEL_PARAMS,
+        estimated_params=estimated_params,
+        standardisation_means=scaled_dataset.means,
+        standardisation_scales=scaled_dataset.stds,
     )
-    kernel = jax.jit(kernel)
-    init_state = init(true_xs)   # no leakage as conditional = False
-
-    def _independent_sample(k_):
-        return kernel(k_, init_state)
-
-    sample_keys = jax.random.split(sample_key, args.M)
-    samples, *_ = jax.vmap(_independent_sample)(sample_keys)
-
-    return samples, true_xs, (ys, indices, obs_types)
-
-# Compile once, without executing a full experiment
-start = time.time()
-compiled_one_experiment = one_experiment.lower(WARMUP_KEY).compile()
-print(f"Compile time: {time.time() - start:.2f} seconds.")
-
-# storage
-zs_all = np.empty((args.K, args.M, args.steps, args.D))
-etas_all = np.empty((args.K, args.M, args.steps, args.D))
-
-true_zs_all = np.empty((args.K, args.steps, args.D))
-true_etas_all = np.empty((args.K, args.steps, args.D))
-
-bond_indices_all = np.empty((args.K, args.steps))
-event_types_all = np.empty((args.K, args.steps))
-alphas_all = np.empty((args.K, args.steps))
-obs_values_all = np.empty((args.K, args.steps))
-
-for k, key_k in enumerate(tqdm.tqdm(EXPERIMENT_KEYS, desc="Experiment: ")):
-    samples_k, true_xs_k, obs_k = compiled_one_experiment(key_k)
-
-    zs, etas = samples_k
-    true_zs, true_etas = true_xs_k
-    ys_k, indices_k, obs_types_k = obs_k
-
-    zs_all[k] = zs
-    etas_all[k] = etas
-    true_zs_all[k] = true_zs
-    true_etas_all[k] = true_etas
-    bond_indices_all[k] = indices_k
-    event_types_all[k] = obs_types_k
-    obs_values_all[k] = ys_k
-
-if not os.path.exists("results"):
-    os.mkdir("results")
-
-experiment_name = "kernel={},style={},D={},T={},N={},steps={},M={},independent={},seed={}"
-experiment_name = experiment_name.format(
-    kernel_type.name,
-    args.style,
-    args.D,
-    args.T,
-    args.N,
-    args.steps,
-    args.M,
-    args.independent,
-    args.seed,
-)
-
-dirpath = f"results/{experiment_name}"
-if not os.path.exists(dirpath):
-    os.mkdir(dirpath)
-
-datapath = f"{dirpath}/data.npz"
-np.savez_compressed(
-    datapath,
-    zs=zs_all,
-    etas=etas_all,
-    true_zs=true_zs_all,
-    true_etas=true_etas_all,
-    bond_indices=bond_indices_all,
-    event_types=event_types_all,
-    alphas=alphas_all,
-    obs_values=obs_values_all
-)

@@ -1,272 +1,280 @@
-"""
-PLOT THE CORPORATE BOND SMOOTHING RESULTS
-"""
-
 import argparse
 import os
 
 import matplotlib.pyplot as plt
 import numpy as np
 
-from experiments.corporate_bonds.kernels import KernelType
 
-
-# ARGS PARSING
 parser = argparse.ArgumentParser()
-
-parser.add_argument("--T", dest="T", type=int, default=10)
-parser.add_argument("--D", dest="D", type=int, default=1)
-parser.add_argument("--M", dest="M", type=int, default=5)
-parser.add_argument("--N", dest="N", type=int, default=31)  # total number of particles is N + 1
+parser.add_argument("--T", type=int, default=100)
+parser.add_argument("--D", type=int, default=1)
 parser.add_argument("--steps", type=int, default=100)
-parser.add_argument("--seed", dest="seed", type=int, default=1234)
+parser.add_argument("--burnin", type=int, default=500)
+parser.add_argument("--samples", type=int, default=500)
+parser.add_argument("--phi", type=float, default=0.1)
+parser.add_argument("--kernel", type=str, default="CSMC")
+parser.add_argument("--seed", type=int, default=1234)
 
-parser.add_argument("--independent", action="store_true")
-parser.set_defaults(independent=False)
+parser.add_argument("--full-inference", action="store_true")
+parser.add_argument("--no-full-inference", dest="full_inference", action="store_false")
+parser.set_defaults(full_inference=False)
 
-parser.add_argument("--kernel", dest="kernel", type=int, default=KernelType.CSMC)
-parser.add_argument("--style", dest="style", type=str, default="bootstrap")
+parser.add_argument("--conditional", action="store_true")
+parser.add_argument("--unconditional", dest="conditional", action="store_false")
+parser.set_defaults(conditional=True)
 
+parser.add_argument("--backward", action="store_true")
+parser.add_argument("--no-backward", dest="backward", action="store_false")
+parser.set_defaults(backward=True)
+
+parser.add_argument("--N", type=int, default=31)
 parser.add_argument("--i", type=int, default=0)
+parser.add_argument("--component", type=int, default=0)
+parser.add_argument("--n-paths", dest="n_paths", type=int, default=10)
+
 args = parser.parse_args()
 
 
-###############################
-#  SINGLE ANALYSIS FUNCTIONS  #
-###############################
+def get_pcs(precision):
+    """Return partial correlations from a precision matrix."""
+    diagonal = np.diag(precision)
+    if np.any(diagonal <= 0):
+        raise ValueError("Precision matrix must have positive diagonal entries.")
 
-# --- args ---
-kernel_type = KernelType(args.kernel)
-Ts = np.cumsum(np.repeat(args.T / args.steps, args.steps))
-
-EVENT_LABELS = {
-    0: "Done (Buy)",
-    1: "Done (Sell)",
-    2: "Traded Away (Buy)",
-    3: "Traded Away (Sell)",
-    4: "D2D Trade",
-}
-
-EVENT_MARKERS = {
-    0: "o",
-    1: "o",
-    2: "+",
-    3: "+",
-    4: "x",
-}
-
-EVENT_COLORS = {
-    0: "red",
-    1: "green",
-    2: "red",
-    3: "green",
-    4: "black",
-}
-
-QUANTILES = (
-    (1, 99, 0.10, "1%-99%"),
-    (5, 95, 0.14, "5%-95%"),
-    (10, 90, 0.18, "10%-90%"),
-    (25, 75, 0.24, "25%-75%"),
-)
+    pcs = -precision / np.sqrt(np.outer(diagonal, diagonal))
+    np.fill_diagonal(pcs, 1.0)
+    return pcs
 
 
-# --- functions ---
-def _legend(fig, axes):
-    """
-    Create a single de-duplicated legend for all axes.
-    """
-    handles, labels = [], []
-    for ax in axes:
-        ax_handles, ax_labels = ax.get_legend_handles_labels()
-        handles.extend(ax_handles)
-        labels.extend(ax_labels)
+def plot_traces(name, history, plotpath, burnin, truth=None, lower_triangle=False):
+    """Plot traces for a scalar, vector, or matrix-valued parameter."""
+    history = np.asarray(history)
+    parameter_shape = history.shape[1:]
 
-    seen = set()
-    handles_unique, labels_unique = [], []
-    for handle, label in zip(handles, labels):
-        if label not in seen and not label.startswith("_"):
-            handles_unique.append(handle)
-            labels_unique.append(label)
-            seen.add(label)
+    if len(parameter_shape) == 0:
+        fig, axes = plt.subplots(1, 1)
+        axes = np.asarray([[axes]])
+        indices = [(0, 0, ())]
+    elif len(parameter_shape) == 1:
+        fig, axes = plt.subplots(parameter_shape[0], 1, figsize=(7, 2.5 * parameter_shape[0]), squeeze=False)
+        indices = [(i, 0, (i,)) for i in range(parameter_shape[0])]
+    elif len(parameter_shape) == 2:
+        fig, axes = plt.subplots(*parameter_shape, figsize=(3 * parameter_shape[1], 2.5 * parameter_shape[0]), squeeze=False)
+        indices = [(i, j, (i, j)) for i in range(parameter_shape[0]) for j in range(parameter_shape[1])]
+    else:
+        raise ValueError(f"{name} must be scalar, vector, or matrix-valued; got shape {parameter_shape}.")
 
-    fig.legend(handles_unique, labels_unique, loc="upper center", ncol=5, frameon=False)
-
-
-def _plot_observations_on_axis(ax, bond_indices, event_types, obs_values, dim):
-    """
-    Plot observations attached to a single bond index.
-    """
-    mask_dim = bond_indices == dim
-
-    for event_type in EVENT_LABELS:
-        mask = mask_dim & (event_types == event_type)
-        if not np.any(mask):
+    for i, j, index in indices:
+        ax = axes[i, j]
+        if lower_triangle and len(index) == 2 and index[1] > index[0]:
+            ax.axis("off")
             continue
 
-        ax.scatter(
-            Ts[mask],
-            obs_values[mask],
-            color=EVENT_COLORS[event_type],
-            marker=EVENT_MARKERS[event_type],
-            s=35,
-            linewidths=1.25,
-            label=EVENT_LABELS[event_type],
-            zorder=5,
-        )
+        ax.plot(history[(slice(None),) + index])
+        if truth is not None:
+            ax.axhline(np.asarray(truth)[index], linestyle=":", color="red")
+        ax.axvline(burnin, linestyle="--", color="black")
+        suffix = "".join(f"[{value}]" for value in index)
+        ax.set_title(f"{name}{suffix}")
 
-
-def plot_observations(data, dirpath):
-    """
-    Plot one panel per bond showing only the relevant observed transaction or quote values.
-
-    Parameters
-    ----------
-    data : dict-like
-        Must contain:
-        - bond_indices: shape (K, steps)
-        - event_types:  shape (K, steps)
-        - obs_values:   shape (K, steps)
-    dirpath : str
-        Directory where the figure will be saved.
-
-    Returns
-    -------
-    None
-    """
-
-    bond_indices = np.asarray(data["bond_indices"][args.i]).astype(int)
-    event_types = np.asarray(data["event_types"][args.i]).astype(int)
-    obs_values = np.asarray(data["obs_values"][args.i])
-
-    fig, axes = plt.subplots(args.D, 1, figsize=(14, 3.25 * args.D), sharex=True, squeeze=False)
-    axes = axes[:, 0]
-
-    for dim, ax in enumerate(axes):
-        _plot_observations_on_axis(ax, bond_indices, event_types, obs_values, dim)
-        ax.set_title(f"Bond {dim + 1}")
-        ax.set_ylabel("Observed YtB / quote")
-        ax.grid(alpha=0.25)
-
-    axes[-1].set_xlabel("Business time")
-    _legend(fig, axes)
-    fig.tight_layout(rect=[0, 0, 1, 0.92])
-    fig.savefig(f"{dirpath}/observations.png", dpi=200, bbox_inches="tight")
+    fig.tight_layout()
+    fig.savefig(f"{plotpath}/{name}_traces.png", dpi=200, bbox_inches="tight")
     plt.close(fig)
 
 
-def plot_estimations(data, dirpath):
-    """
-    Plot one panel per bond showing quantile-band smoothing estimates and the relevant observations.
+def plot_posterior_summary(name, history, truth, posterior_slice, plotpath):
+    """Plot true and posterior mean summaries for a vector or matrix parameter."""
+    posterior_mean = history[posterior_slice].mean(axis=0)
+    truth = np.asarray(truth)
 
-    Notes
-    -----
-    The experiment stores smoothing paths, not filter particle clouds. Therefore the shaded regions are
-    empirical marginal quantile envelopes over the sampled smoothing paths at each observation time.
-    Individual smoothing samples are deliberately not plotted.
+    print(f"\nPosterior mean {name}:\n", posterior_mean)
+    print(f"True {name}:\n", truth)
+    print(f"{name} absolute error:", np.abs(posterior_mean - truth).sum())
 
-    Parameters
-    ----------
-    data : dict-like
-        Must contain:
-        - etas:         shape (K, M, steps, D)
-        - true_etas:    shape (K, steps, D)
-        - bond_indices: shape (K, steps)
-        - event_types:  shape (K, steps)
-        - obs_values:   shape (K, steps)
-    dirpath : str
-        Directory where the figure will be saved.
+    if truth.ndim == 1:
+        true_value = np.atleast_2d(truth)
+        posterior_value = np.atleast_2d(posterior_mean)
+        fig, axes = plt.subplots(1, 2, figsize=(12, 2.75))
+        scale = max(np.max(np.abs(true_value)), np.max(np.abs(posterior_value)))
+        for ax, value, title in [(axes[0], true_value, f"True {name}"), (axes[1], posterior_value, f"Posterior mean {name}")]:
+            image = ax.imshow(value, cmap="coolwarm", vmin=-scale, vmax=scale, interpolation="nearest", aspect="auto")
+            ax.set_title(title)
+            ax.set_xlabel("Component")
+            ax.set_xticks(np.arange(value.shape[1]))
+            ax.set_yticks([])
+        fig.subplots_adjust(wspace=0.3, bottom=0.42)
+        fig.colorbar(image, ax=axes, orientation="horizontal", fraction=0.10, pad=0.30).set_label(f"{name} value")
+    elif truth.ndim == 2:
+        true_value = np.atleast_2d(truth)
+        posterior_value = np.atleast_2d(posterior_mean)
+        fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+        scale = max(np.max(np.abs(true_value)), np.max(np.abs(posterior_value)))
+        for ax, value, title in [(axes[0], true_value, f"True {name}"), (axes[1], posterior_value, f"Posterior mean {name}")]:
+            image = ax.imshow(value, cmap="coolwarm", vmin=-scale, vmax=scale, interpolation="nearest")
+            ax.set_title(title)
+            ax.set_xlabel("Column")
+            ax.set_ylabel("Row")
+            ax.set_xticks(np.arange(value.shape[1]))
+            ax.set_yticks(np.arange(value.shape[0]))
+        fig.subplots_adjust(wspace=0.3, right=0.88)
+        fig.colorbar(image, ax=axes, fraction=0.046, pad=0.04).set_label(f"{name} value")
+    else:
+        raise ValueError(f"{name} must be vector or matrix-valued; got shape {truth.shape}.")
 
-    Returns
-    -------
-    None
-    """
-
-    etas = np.asarray(data["etas"][args.i])
-    true_etas = np.asarray(data["true_etas"][args.i])
-    bond_indices = np.asarray(data["bond_indices"][args.i]).astype(int)
-    event_types = np.asarray(data["event_types"][args.i]).astype(int)
-    obs_values = np.asarray(data["obs_values"][args.i])
-
-    _, _, D = etas.shape
-
-    fig, axes = plt.subplots(D, 1, figsize=(14, 3.5 * D), sharex=True, squeeze=False)
-    axes = axes[:, 0]
-
-    for dim, ax in enumerate(axes):
-        paths_dim = etas[:, :, dim]
-
-        for q_low, q_high, alpha, label in QUANTILES:
-            lo, hi = np.percentile(paths_dim, [q_low, q_high], axis=0)
-            ax.fill_between(Ts, lo, hi, color="blue", alpha=alpha, linewidth=0, label=label)
-
-        median = np.median(paths_dim, axis=0)
-        ax.plot(Ts, median, color="black", linestyle="--", linewidth=1.4, label="Median smoothing path")
-        ax.plot(Ts, true_etas[:, dim], color="black", alpha=0.55, linewidth=1.2, label="True eta")
-
-        _plot_observations_on_axis(ax, bond_indices, event_types, obs_values, dim)
-        ax.set_title(f"Bond {dim + 1}")
-        ax.set_ylabel("Mid-YtB eta")
-        ax.grid(alpha=0.25)
-
-    axes[-1].set_xlabel("Business time")
-    _legend(fig, axes)
-    fig.tight_layout(rect=[0, 0, 1, 0.90])
-    fig.savefig(f"{dirpath}/estimations.png", dpi=200, bbox_inches="tight")
+    fig.savefig(f"{plotpath}/{name}_summary.png", dpi=200, bbox_inches="tight")
     plt.close(fig)
 
 
-########################
-#  load data function  #
-########################
+def plot_covariance_diagnostics(name, history, truth, posterior_slice, plotpath):
+    """Plot precision and partial-correlation summaries for a covariance parameter."""
+    precision_hist = np.linalg.inv(history)
+    diagnostics = [
+        ("precision", np.linalg.inv(truth), precision_hist[posterior_slice].mean(axis=0), "precision value"),
+        ("pcs", get_pcs(np.linalg.inv(truth)), np.stack([get_pcs(value) for value in precision_hist[posterior_slice]]).mean(axis=0), "partial correlation"),
+    ]
 
-def load_data(kernel, style, D, steps):
-    experiment_name = "kernel={},style={},D={},T={},N={},steps={},M={},independent={},seed={}"
-    experiment_name = experiment_name.format(
-        kernel.name,
-        style,
-        D,
-        args.T,
-        args.N,
-        steps,
-        args.M,
-        args.independent,
-        args.seed,
-    )
-    dirpath = f"results/{experiment_name}"
-    if not os.path.exists(dirpath):
-        print("No such experiment exists")
-        print(experiment_name)
-        exit()
+    for label, true_value, posterior_value, colourbar_label in diagnostics:
+        fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+        scale = max(np.max(np.abs(true_value)), np.max(np.abs(posterior_value)))
+        for ax, value, title in [(axes[0], true_value, f"True {label} {name}"), (axes[1], posterior_value, f"Posterior mean {label} {name}")]:
+            image = ax.imshow(value, cmap="coolwarm", vmin=-scale, vmax=scale, interpolation="nearest")
+            ax.set_title(title)
+            ax.set_xlabel("Column")
+            ax.set_ylabel("Row")
+            ax.set_xticks(np.arange(value.shape[1]))
+            ax.set_yticks(np.arange(value.shape[0]))
+        fig.colorbar(image, ax=axes, fraction=0.046, pad=0.04).set_label(colourbar_label)
+        fig.subplots_adjust(wspace=0.3)
+        fig.savefig(f"{plotpath}/{label}_{name}_heatmaps.png", dpi=200, bbox_inches="tight")
+        plt.close(fig)
 
-    data = np.load(f"{dirpath}/data.npz")
-    return data, dirpath
+experiment_name = "kernel={},D={},T={},steps={},phi={},N={},samples={},burnin={},full-inference={},conditional={},seed={}"
+experiment_name = experiment_name.format(
+    args.kernel,
+    args.D,
+    args.T,
+    args.steps,
+    args.phi,
+    args.N,
+    args.samples,
+    args.burnin,
+    args.full_inference,
+    args.conditional,
+    args.seed,
+)
+
+dirpath = f"results/{experiment_name}"
+datapath = f"{dirpath}/data.npz"
+if not os.path.exists(datapath):
+    raise FileNotFoundError(f"Could not find saved data at {datapath}")
+
+plotpath = f"{dirpath}/plots"
+os.makedirs(plotpath, exist_ok=True)
+results = np.load(datapath, allow_pickle=True)
+print(f"Loaded results from: {dirpath}")
+
+true_params = results["true_params"].item()
+estimated_params = results["estimated_params"].item()
+param_hist = results["params"].item()
+sample_hist = results["trajectories"]
+dataset = results["dataset"].item()
+true_xs = dataset.states
+means = results["standardisation_means"]
+scales = results["standardisation_scales"]
+posterior_slice = slice(args.burnin + 1, args.burnin + args.samples + 1)
 
 
-data, dirpath = load_data(kernel_type, args.style, args.D, args.steps)
-plot_observations(data, dirpath)
-plot_estimations(data, dirpath)
+##########################
+#       Plot params      #
+##########################
+# Add each inferred parameter once here, including its inverse standardisation.
+parameter_histories = {
+    "m0": means[None, :] + scales[None, :] * param_hist["m0"],
+    "H0": scales[None, :, None] * param_hist["H0"] * scales[None, None, :],
+    "H": scales[None, :, None] * param_hist["H"] * scales[None, None, :],
+}
+
+for name, history in parameter_histories.items():
+    truth = true_params[name]
+    is_covariance = history.ndim == 3 and history.shape[-1] == history.shape[-2]
+    plot_traces(name, history, plotpath, args.burnin, truth, lower_triangle=is_covariance)
+    plot_posterior_summary(name, history, truth, posterior_slice, plotpath)
+
+    if name in ("H", "H0"):
+        plot_covariance_diagnostics(name, history, truth, posterior_slice, plotpath)
+
+if "tau" in param_hist:
+    plot_traces("tau", param_hist["tau"], plotpath, args.burnin)
+
+if "llambda" in param_hist:
+    plot_traces("llambda", param_hist["llambda"], plotpath, args.burnin, lower_triangle=True)
 
 
+#################################
+#       plot trajectories       #
+#################################
+sample_zs, sample_etas_standard = sample_hist
+true_zs, true_etas = true_xs
+sample_etas = means[None, None, :] + scales[None, None, :] * sample_etas_standard
+posterior_zs = sample_zs[posterior_slice]
+posterior_etas = sample_etas[posterior_slice]
+z_plotpath = f"{plotpath}/zs"
+eta_plotpath = f"{plotpath}/etas"
+os.makedirs(z_plotpath, exist_ok=True)
+os.makedirs(eta_plotpath, exist_ok=True)
 
-i = 0
-zs = data["zs"][i]      # (M, steps, D)
-etas = data["etas"][i]  # (M, steps, D)
+for d in range(args.D):
+    for name, samples, truth, state_plotpath in [
+        ("z", posterior_zs, true_zs[:, d], z_plotpath),
+        ("eta", posterior_etas, true_etas[:, d], eta_plotpath),
+    ]:
+        mean = samples[:, :, d].mean(axis=0)
+        plt.figure(figsize=(25, 5))
+        plt.plot(truth, label=f"true {name}", linestyle="--", color="blue")
+        plt.plot(mean, label="posterior mean", color="black")
+        for s in range(min(args.n_paths, samples.shape[0])):
+            plt.plot(samples[s, :, d], alpha=0.15, color="grey")
+        plt.xlabel("t")
+        plt.ylabel(f"{name}[{d}]")
+        plt.legend()
+        plt.savefig(f"{state_plotpath}/{name}_inference_d={d}.png", dpi=200, bbox_inches="tight")
+        plt.close()
+        print(f"{name}[{d}] posterior mean RMSE:", np.sqrt(np.mean((mean - truth) ** 2)))
 
-print("finite zs:", np.isfinite(zs).all())
-print("finite etas:", np.isfinite(etas).all())
 
-print("max |z|:", np.max(np.abs(zs)))
-print("max |eta|:", np.max(np.abs(etas)))
+####################################
+#       plot replacement rate      #
+####################################
+replacement_rates = results["replacement_rates"]
+posterior_replacement_rates = replacement_rates[args.burnin:args.burnin + args.samples]
+mean_replacement_rate = replacement_rates.mean(axis=1)
 
-print("z quantiles:", np.quantile(zs, [0.0, 0.5, 0.9, 0.99, 0.999, 1.0]))
-print("eta quantiles:", np.quantile(etas, [0.0, 0.5, 0.9, 0.99, 0.999, 1.0]))
+plt.figure()
+plt.plot(mean_replacement_rate)
+plt.axvline(args.burnin, linestyle="--", color="black")
+plt.xlabel("Gibbs iteration")
+plt.ylabel("Mean replacement rate")
+plt.ylim(0.0, 1.0)
+plt.tight_layout()
+plt.savefig(f"{plotpath}/replacement_rate_trace.png", dpi=200, bbox_inches="tight")
+plt.close()
 
-m, t, d = np.unravel_index(np.argmax(np.abs(etas)), etas.shape)
-print("worst eta index:", m, t, d)
-print("worst eta:", etas[m, t, d])
-print("corresponding z path:", zs[m, t])
-print("event:")
-print("bond_idx:", data["bond_indices"][i, t])
-print("event_type:", data["event_types"][i, t])
-print("obs_value:", data["obs_values"][i, t])
+plt.figure(figsize=(10, 5))
+image = plt.imshow(replacement_rates.T, aspect="auto", origin="lower", cmap="viridis", vmin=0.0, vmax=1.0, interpolation="nearest")
+plt.axvline(args.burnin, linestyle="--", color="white")
+plt.xlabel("Gibbs iteration")
+plt.ylabel("State time")
+plt.colorbar(image).set_label("Replacement rate")
+plt.tight_layout()
+plt.savefig(f"{plotpath}/replacement_rate_heatmap.png", dpi=200, bbox_inches="tight")
+plt.close()
+
+plt.figure()
+plt.plot(posterior_replacement_rates.mean(axis=0), color="black")
+plt.xlabel("State time")
+plt.ylabel("Posterior mean replacement rate")
+plt.ylim(0.0, 1.0)
+plt.tight_layout()
+plt.savefig(f"{plotpath}/replacement_rate_by_time.png", dpi=200, bbox_inches="tight")
+plt.close()
+print("Posterior mean replacement rate:", posterior_replacement_rates.mean())

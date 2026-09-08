@@ -1,85 +1,50 @@
+# ARGS PARSING
 import argparse
 import os
-import shlex
-import subprocess
 
+from itertools import product
 from rbsmc.utils.printing import ctext
-from experiments.corporate_bonds.kernels import KernelType
-
 
 parser = argparse.ArgumentParser()
-
-parser.add_argument("--T", dest="T", type=int, default=1)
-parser.add_argument("--K", dest="K", type=int, default=1)
-parser.add_argument("--M", dest="M", type=int, default=5)
-
-parser.add_argument("--independent", action="store_true")
-parser.set_defaults(independent=False)
-
-parser.add_argument("--log-var", dest="log_var", type=float, default=0)
-parser.add_argument("--phi", dest="phi", type=float, default=0.8)
-
-parser.add_argument("--seed", dest="seed", type=int, default=1234)
-parser.add_argument("--style", dest="style", type=str, default="bootstrap")
-
-parser.add_argument("--backward", action="store_true")
-parser.add_argument("--no-backward", dest="backward", action="store_false")
-parser.set_defaults(backward=True)
-
-parser.add_argument("--resampling", dest="resampling", type=str, default="multinomial")
-parser.add_argument("--last-step", dest="last_step", type=str, default="barker")
-parser.add_argument("--N", dest="N", type=int, default=31)
-
-parser.add_argument("--debug", action="store_true")
-parser.add_argument("--no-debug", dest="debug", action="store_false")
-parser.set_defaults(debug=False)
-
 parser.add_argument("--i", dest="i", type=int, default=-1)
-parser.add_argument("--start-i", dest="start_i", type=int, default=0)
+parser.add_argument("--seed", dest="seed", type=int, default=1234)
+parser.add_argument("--N", dest="N", type=int, default=31)
+parser.add_argument("--M", dest="M", type=int, default=1)
+parser.add_argument("--burnin", dest="burnin", type=int, default=1000)
+parser.add_argument("--samples", dest="samples", type=int, default=500)
+parser.add_argument("--phi", dest="phi", type=float, default=0.1)
 
-parser.add_argument("--run", dest="run", action="store_true")
-parser.add_argument("--no-run", dest="run", action="store_false")
-parser.set_defaults(run=False)
+parser.add_argument("--full-inference", action="store_true")
+parser.add_argument("--no-full-inference", dest="full_inference", action="store_false")
+parser.set_defaults(full_inference=False)
 
 args = parser.parse_args()
 
 
-# ---------------------------------------------------------------------
-# Sweep controls
-# ---------------------------------------------------------------------
-KERNEL_TYPES = (KernelType.CSMC, KernelType.RB_CSMC)
-STYLES = ("bootstrap", "bootstrap")
-KERNELS = tuple(zip(KERNEL_TYPES, STYLES, strict=True))
+def results_exist(*, D, T, steps, args, kernel) -> bool:
+    """Mirror experiment.py's experiment_name + datapath convention and check if results already exist."""
 
-DS = (1, 5, 10, 25, 50, 75, 100)
-BASE_T = args.T
+    if kernel == 0:
+        kernel_name = "CSMC"
+    elif kernel == 1:
+        kernel_name = "RB_CSMC"
+    elif kernel == 2:
+        kernel_name = "GUEANT"
+    else:
+        raise ValueError("Invalid kernel int provided: must be in [0, 1, 2]")
 
-
-def experiment_id(*, kernel, style, D, T, steps):
-    return {
-        "kernel": kernel,
-        "style": style,
-        "D": int(D),
-        "T": int(T),
-        "steps": int(steps),
-    }
-
-
-def results_exist(*, kernel, style, D, T, steps, args) -> bool:
-    """
-    Mirrors experiment.py's experiment_name + datapath convention.
-    Must match experiment.py exactly.
-    """
-    experiment_name = "kernel={},style={},D={},T={},N={},steps={},M={},independent={},seed={}"
+    experiment_name = "kernel={},D={},T={},steps={},phi={},N={},samples={},burnin={},full-inference={},conditional={},seed={}"
     experiment_name = experiment_name.format(
-        kernel.name,
-        style,
+        kernel_name,
         D,
         T,
-        args.N,
         steps,
-        args.M,
-        args.independent,
+        args.phi,
+        args.N,
+        args.samples,
+        args.burnin,
+        args.full_inference,
+        True,
         args.seed,
     )
 
@@ -87,94 +52,28 @@ def results_exist(*, kernel, style, D, T, steps, args) -> bool:
     return os.path.exists(datapath)
 
 
-def build_combinations():
-    combinations = []
+DS = (3, 10, 15, 20)
+TS = (500, 1000, 1500, 2000, 2500, 3000)
+KERNELS = (0, 1, 2)
 
-    for kernel, style in KERNELS:
-        for D in DS:
-            steps = 10 * D
-            combinations.append(experiment_id(kernel=kernel, style=style, D=D, T=BASE_T, steps=steps))
+combination = [(D, T, kernel) for D, T, kernel in product(DS, TS, KERNELS) if D < 15 or T >= 1500][::-1]
+print(f"Number of experiments: {len(combination)}")
 
-    return combinations
+if args.i != -1 and not (0 <= args.i < len(combination)):
+    raise ValueError(f"--i must be in [0, {len(combination)-1}] or -1, got {args.i}")
 
-
-def build_command(*, combo, args):
-    cmd = [
-        "python3", "experiment.py",
-        "--kernel", str(combo["kernel"].value),
-        "--style", combo["style"],
-        "--D", str(combo["D"]),
-        "--T", str(combo["T"]),
-        "--steps", str(combo["steps"]),
-        "--K", str(args.K),
-        "--N", str(args.N),
-        "--M", str(args.M),
-        "--log-var", str(args.log_var),
-        "--phi", str(args.phi),
-        "--resampling", args.resampling,
-        "--last-step", args.last_step,
-        "--seed", str(args.seed),
-    ]
-
-    if args.independent:
-        cmd.append("--independent")
-
-    if not args.backward:
-        cmd.append("--no-backward")
-
-    if args.debug:
-        cmd.append("--debug")
-
-    return cmd
-
-
-COMBINATIONS = build_combinations()
-
-print(f"Number of experiments: {len(COMBINATIONS)}")
-print(f"T:                     {BASE_T}")
-print(f"D grid:                {DS}")
-print(f"steps rule:            steps = 10 * D")
-print(f"steps grid:            {[c['steps'] for c in COMBINATIONS]}")
-print(f"kernels:               {[k.name for k in KERNEL_TYPES]}")
-print(f"styles:                {STYLES}")
-print(f"N:                     {args.N}")
-print(f"M:                     {args.M}")
-print(f"K:                     {args.K}")
-print(f"independent:           {args.independent}")
-print(f"backward:              {args.backward}")
-print(f"resampling:            {args.resampling}")
-print(f"last step:             {args.last_step}")
-
-if args.i != -1 and not (0 <= args.i < len(COMBINATIONS)):
-    raise ValueError(f"--i must be in [0, {len(COMBINATIONS) - 1}] or -1, got {args.i}")
-
-if not (0 <= args.start_i < len(COMBINATIONS)):
-    raise ValueError(f"--start-i must be in [0, {len(COMBINATIONS) - 1}], got {args.start_i}")
-
-indices = range(args.start_i, len(COMBINATIONS)) if args.i == -1 else [args.i]
+indices = range(len(combination)) if args.i == -1 else [args.i]
 
 for j in indices:
-    combo = COMBINATIONS[j]
+    D, T, kernel = combination[j]
+    steps = T - 1
 
-    D = combo["D"]
-    T = combo["T"]
-    steps = combo["steps"]
-    kernel = combo["kernel"]
-    style = combo["style"]
-
-    if results_exist(kernel=kernel, style=style, D=D, T=T, steps=steps, args=args):
-        print(
-            ctext(
-                f"Skipping already run: kernel={kernel.name}, style={style}, T={T}, D={D}, steps={steps}, N={args.N}, M={args.M}, K={args.K}, independent={args.independent}",
-                "yellow",
-            )
-        )
+    if results_exist(D=D, T=T, steps=steps, args=args, kernel=kernel):
+        print(ctext(f"Skipping (already run): kernel={kernel} D={D}, T={T}, steps={steps}, N={args.N}, samples={args.samples}, burnin={args.burnin}, full-inference={args.full_inference}", "yellow"))
         continue
 
-    cmd = build_command(combo=combo, args=args)
-    exec_str = shlex.join(cmd)
-
-    print("\nExecuting:", ctext(f"[{j}/{len(COMBINATIONS) - 1}] kernel={kernel.name}, style={style}, D={D}, T={T}, steps={steps} :: {exec_str}", "green"))
-
-    if args.run:
-        subprocess.run(cmd, check=True)
+    inference_flag = "--full-inference" if args.full_inference else "--no-full-inference"
+    exec_str = "python3 experiment.py --kernel {} --D {} --T {} --steps {} --N {} --M {} --samples {} --burnin {} --phi {} --seed {} {}"
+    exec_str = exec_str.format(kernel, D, T, steps, args.N, args.M, args.samples, args.burnin, args.phi, args.seed, inference_flag)
+    print("\nExecuting:", ctext(exec_str, "green"))
+    # os.system(exec_str)
