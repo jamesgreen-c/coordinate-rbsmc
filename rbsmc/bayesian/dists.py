@@ -152,7 +152,7 @@ class InverseGammaDistParam(DistParam):
 
     @property
     def nat_param(self) -> InverseGammaNatParam:
-        return InverseGammaNatParam(self.alpha, self.beta)
+        return InverseGammaNatParam(alpha_plus_one=self.alpha + 1, beta=self.beta)
 
     def sample(self, key: Array, shape: Sequence[int] = ()) -> Array:
         return inverse_gamma(key, self.alpha, self.beta)
