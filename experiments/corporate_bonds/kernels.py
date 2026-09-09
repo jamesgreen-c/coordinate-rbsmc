@@ -1,412 +1,537 @@
 from enum import Enum
-from functools import partial
-from typing import Callable
 
-import jax
 import jax.numpy as jnp
 import jax.random as jr
 
+from jax import Array, vmap
 from jax.random import PRNGKey
-from jax import Array
-
-import numpy as np
-from jax.scipy.stats import norm
+from jax.tree_util import tree_map, tree_leaves
 from jax.scipy.linalg import solve_triangular
-from jax.tree_util import tree_map
 
-from experiments.corporate_bonds.model import log_potential, ou_diag_transition
+import rbsmc.csmc as csmc
+import rbsmc.rb_csmc as rb_csmc
+import rbsmc.gueant as gueant
 
-from rbsmc.utils.math import mvn_logpdf
-from rbsmc.utils.mcmc_utils import aux_sampling_routine, delta_adaptation_routine
-from rbsmc import rb_csmc
-from rbsmc import csmc
-# from cd_ssm import gueant as gueant_csmc
+from rbsmc.utils.mvn import mvn_logpdf
+from rbsmc.bayesian.smc import FeynmanKac
+
+from experiments.corporate_bonds.prior import log_p0, log_pt, log_ht, ou_diag_transition
 
 
 class KernelType(Enum):
     CSMC = 0
     RB_CSMC = 1
     GUEANT = 2
-    
+
     @property
     def kernel_maker(self):
         if self == KernelType.CSMC:
-            return get_csmc_kernel
+            return CSMC
         elif self == KernelType.RB_CSMC:
-            return get_rb_csmc_kernel
+            return RBcSMC
         elif self == KernelType.GUEANT:
-            return get_gueant_csmc_kernel
+            return GueantCSMC
         else:
             raise NotImplementedError
 
-    
-    def shape_delta(self, delta, T):
-        if self == KernelType.CSMC:
-            return delta
-        elif self == KernelType.RB_CSMC:
-            return delta
-        elif self == KernelType.GUEANT:
-            return delta
-        else:
-            return NotImplementedError("Shape delta not implemented for kernel type")
 
+######################################
+#       CSMC Feynman-Kac Model       # 
+######################################
 
-#######################
-# Kernel constructors #
-#######################
+class CSMC(FeynmanKac):
 
-def get_csmc_kernel(
-        ys: Array,
-        indices: Array,
-        obs_types: Array,
-        alpha: Array,
-        psi: Array,
-        A: Array,
-        chol_Q0: Array,
-        chol_Q: Array,
-        chol_H0: Array,
-        chol_H: Array,
-        chol_R: Array, 
-        N, 
-        dts,
-        style="bootstrap",
-        **kwargs
-):
-    """
-    
-    Paramters
-    ---------
-    ys:         (T,) Observation values,
-    indices:    (T,) Index of the relevant dimension at observation t
-    obs_types:  (T,) The class of observation ie D2C, D2D, RFQ
-    alpha:      (D,) The acceptable width of D2D trades for each bond
-    psi:        (D,) Half-spread scale
-    A:          (D, D) Diagonal transition matrix for the log half-spreads zs
-    chol_Q0:    (D, D) Cholesky of the initial covariance matrix of zs
-    chol_Q:     (D, D) Cholesky of the covariance matrix of zs
-    chol_H0:    (D, D) Cholesky of the initial covariance matrix of mid-prices etas
-    chol_H:     (D, D) Cholesky of the covariance matrix of mid-prices etas
-    chol_R:     (D, D) Cholesky factor of the covariance of the ys
-    N:          The number of particles, 
-    dts         The change in time between each observation. dts[0] = 0 
-    """
-    T = ys.shape[0]
-    D = A.shape[0]
-    ts = jnp.cumsum(dts)
+    name: str = "CSMC"
 
-    # precompute exact OU transition dynamics and inverse cholesky factors
-    H = chol_H @ chol_H.T
-    Fs, chol_Qs = jax.vmap(lambda dt: ou_diag_transition(A, chol_Q, dt))(dts)
-    inv_chol_Q0 = solve_triangular(chol_Q0, jnp.eye(D), lower=True)
-    inv_chol_H0 = solve_triangular(chol_H0, jnp.eye(D), lower=True)
+    def __init__(
+            self, 
+            N: int,
+            D: int,
+            dts: Array, 
+        ):
+        """
+        Parameters
+        ----------
+        N:    Number of particles
+        D:    Latent state dimension
+        dts:  (K-1, D) transition times has K-1 length where K is number of observations
+        """
 
-    if style == "bootstrap":
+        self.N = N
+        self.D = D
+        self.dts = dts
 
-        def M0_rvs(key, _):
-            eps_z, eps_eta = jr.normal(key, shape=(2, N+1, D))
-            
-            # bootstrap from prior
-            z = eps_z @ chol_Q0.T
-            eta = eps_eta @ chol_H0.T
-            return (z, eta)
+    def M0_rvs(self, params, key, _):
+
+        m0 = params["m0"]
+        Q0 = params["Q0"]
+        H0 = params["H0"]
+        chol_Q0 = jnp.linalg.cholesky(Q0)
+        chol_H0 = jnp.linalg.cholesky(H0)
+
+        D = chol_Q0.shape[-1]
+        eps_z, eps_eta = jr.normal(key, shape=(2, self.N+1, D))
+
+        # bootstrap from prior
+        z = eps_z @ chol_Q0.T
+        eta = m0 + eps_eta @ chol_H0.T
+        return (z, eta)
+
+    def Mt_rvs(self, params, key, x_t_m_1, inp):
+        """
+        Parameters
+        ----------
+        xp:  (z_t_m_1, eta_t_m_1) where
+                - z_t_m_1:   (N, D)
+                - eta_t_m_1: (N, D)
+        """
+        H = params["H"]
+        chol_H = jnp.linalg.cholesky(H)
         
-        def Mt_rvs(key, x_t_m_1, params):
-            """
-            Parameters
-            ----------
-            x_t_m_1:  (z_t, eta_t) where
-                        - z_t:   (N, D)
-                        - eta_t: (N, D)
-            """
-            _, _, _, F_t, chol_Q_t, dt = params
-            z_t_m_1, eta_t_m_1 = x_t_m_1
-            eps_z, eps_eta = jr.normal(key, shape=(2, N+1, D))
+        F_t, chol_Q_t, dt, _ = inp
+        z_t_m_1, eta_t_m_1 = x_t_m_1
 
-            # bootstrap from prior
-            z_t = z_t_m_1 @ F_t.T + eps_z @ chol_Q_t.T
-            eta_t = eta_t_m_1 + jnp.sqrt(dt) * (eps_eta @ chol_H.T)
-            return (z_t, eta_t)
+        D = eta_t_m_1.shape[-1]
+        eps_z, eps_eta = jr.normal(key, shape=(2, self.N+1, D))
+
+        # bootstrap from prior
+        z_t = z_t_m_1 @ F_t.T + eps_z @ chol_Q_t.T
+        eta_t = eta_t_m_1 + jnp.sqrt(dt) * (eps_eta @ chol_H.T)
+        return (z_t, eta_t)
+
+    def M0_logpdf(self, params, x0, inp, constant: bool):
+        """ Implement logpdf for t=0 proposal kernel """
+        return log_p0(params, x0, constant=constant)
+
+    def Mt_logpdf(self, params, xp, x, inp, constant: bool): 
+        """ Implement logpdf for Markov proposal kernel """
+        _, _, dt, *_ = inp
+        return log_pt(params, xp, x, dt, constant=constant)
+
+    def G0_logpdf(self, params, x0, inp):
+        data = inp[-1]
+        return log_ht(params, x0, data)
+
+    def Gt_logpdf(self, params, x, inp):
+        """ Implement logpdf for potential function """
+        data = inp[-1]
+        return log_ht(params, x, data)
+
+    def init(self, key: PRNGKey, params: dict, data: tuple[Array], **kwargs):
+        """
+        I know apriori the latent state is two components 
+            x = (z, eta)
+        where z and eta have the same dimensions.
+
+        Parameters 
+        ----------
+        key:       RNG
+        data:      Tuple containing all observation modalities (ie bond idx, trade price etc)
+        **kwargs:  Extra keywords for specific kernel being used
+
+        Returns
+        -------
+        state:     (xs, Bs) for states and (backward) ancestors
+        """
+        # init a dummy state
+        K = self.dts.shape[0] + 1  # number of time increments
+        dummy_x = (jnp.zeros((K, self.D)), jnp.zeros((K, self.D)))
+        dummy_state = (dummy_x, jnp.zeros((K,), dtype=int))
+
+        # pass dummy state into an unconditional SMC run (state only used for shape)
+        kernel = self.get_kernel(params, dummy_state, data, conditional=False, **kwargs)
+        xs, Bs, log_ws = kernel(key)
+        return (xs, Bs)
+
+    def get_kernel(
+            self, 
+            params: dict, 
+            state: Array, 
+            data: tuple[Array], 
+            conditional: bool, 
+            **kwargs
+        ):
+        """
         
-        def M0_logpdf(x):
-            z, eta = x
-            
-            m0 = jnp.zeros((N+1, D))
-            val = mvn_logpdf(z, m0, None, chol_inv=inv_chol_Q0, constant=False)
-            val += mvn_logpdf(eta, m0, None, chol_inv=inv_chol_H0, constant=False)
-            return val
+        Parameters
+        ----------
 
-        def Mt_logpdf(x_t_m_1, x_t, params):
-            _, _, _, F_t, chol_Q_t, dt = params
-            z_t_m_1, eta_t_m_1 = x_t_m_1
-            z_t, eta_t = x_t
-
-            # calculate log half-spread logpdf
-            inv_chol_Q_t = solve_triangular(chol_Q_t, jnp.eye(D), lower=True)
-            val = mvn_logpdf(z_t, z_t_m_1 @ F_t.T, None, chol_inv=inv_chol_Q_t, constant=False)
-
-            # calculate mid-YtB logpdf
-            inv_chol_H = solve_triangular(jnp.sqrt(dt) * chol_H, jnp.eye(D), lower=True)
-            val += mvn_logpdf(eta_t, eta_t_m_1, None, chol_inv=inv_chol_H, constant=False)
-
-            return val
+        Returns
+        -------
+        """
         
-        def Gamma_0(x):
-            i = indices[0]
-            z, eta = x
-            
-            z_i, eta_i = z[..., i], eta[..., i]
-            val = log_potential(i, ys[0], z_i, eta_i, obs_types[0], alpha[i], psi, chol_R)
-            val += M0_logpdf(x)
+        # precomputations
+        A = params["A"]
+        Q = params["Q"]
+        Fs, chol_Qs = vmap(lambda dt: ou_diag_transition(A, Q, dt))(self.dts)  # (K-1, ...)
 
-            return val
+        # define inputs
+        inp_0 = (tree_map(lambda x: x[0], data), )
+        inps = (Fs, chol_Qs, self.dts, tree_map(lambda x: x[1:], data)) 
 
-        def Gamma_t(x_t_m_1, x_t, params):
-            y_t, obs_type_t, i_t, *_ = params
-            z_t, eta_t = x_t
+        # close over pdfs 
+        M0_rvs = lambda _k, _: self.M0_rvs(params, _k, _)
+        Mt_rvs = lambda _k, _xp, _inp: self.Mt_rvs(params, _k, _xp, _inp)
+        M0_logpdf = lambda _x: self.M0_logpdf(params, _x, inp_0, constant=True)
+        Mt_logpdf = lambda _xp, _x, _inp: self.Mt_logpdf(params, _xp, _x, _inp, constant=True)
+        Gamma_0 = lambda _x: self.Gamma_0(params, _x, inp_0, constant=True)
+        Gamma_t = lambda _xp, _x, _inp: self.Gamma_t(params, _xp, _x, _inp, constant=True)
 
-            z_ti, eta_ti = z_t[..., i_t], eta_t[..., i_t]
-            val = log_potential(i_t, y_t, z_ti, eta_ti, obs_type_t, alpha[i_t], psi, chol_R)
-            val += Mt_logpdf(x_t_m_1, x_t, params)
-            
-            return val
+        # pack functions
+        M0 = M0_rvs, M0_logpdf
+        Mt = Mt_rvs, Mt_logpdf, inps
+        Gamma_t_plus_params = Gamma_t, inps
 
-    inps = (ys[1:], obs_types[1:], indices[1:], Fs[1:], chol_Qs[1:], dts[1:]) 
-    M0 = M0_rvs, M0_logpdf
-    Mt = Mt_rvs, Mt_logpdf, inps
-    Gamma_t_plus_params = Gamma_t, inps
+        kernel = lambda _k: csmc.kernel(
+            _k, state[0], state[1], 
+            M0, Gamma_0, Mt, Gamma_t_plus_params, 
+            N=self.N, conditional=conditional,
+            **kwargs
+        )
 
-    init = lambda x: (x, jnp.zeros((T,), dtype=int))
-    kernel = lambda key, state, *_: csmc.kernel(
-        key, 
-        state[0], 
-        state[1], 
-        M0, 
-        Gamma_0, 
-        Mt, 
-        Gamma_t_plus_params,
-        N=N+1, 
-        **kwargs
-    )
-
-    return kernel, init
-
-def get_rb_csmc_kernel(
-        ys: Array,
-        indices: Array,
-        obs_types: Array,
-        alpha: Array,
-        psi: Array,
-        A: Array,
-        chol_Q0: Array,
-        chol_Q: Array,
-        chol_H0: Array,
-        chol_H: Array,
-        chol_R: Array, 
-        N, 
-        dts,
-        style="bootstrap",
-        **kwargs
-):
-    """
-    
-    Paramters
-    ---------
-    ys:         (T,) Observation values,
-    indices:    (T,) Index of the relevant dimension at observation t
-    obs_types:  (T,) The class of observation ie D2C, D2D, RFQ
-    alpha:      (D,) The acceptable width of D2D trades for each bond
-    psi:        (D,) Half-spread scale
-    A:          (D, D) Diagonal transition matrix for the log half-spreads zs
-    chol_Q0:    (D, D) Cholesky of the initial covariance matrix of zs
-    chol_Q:     (D, D) Cholesky of the covariance matrix of zs
-    chol_H0:    (D, D) Cholesky of the initial covariance matrix of mid-prices etas
-    chol_H:     (D, D) Cholesky of the covariance matrix of mid-prices etas
-    chol_R:     (D, D) Cholesky factor of the covariance of the ys
-    N:          The number of particles, 
-    dts         The change in time between each observation. dts[0] = 0 
-    """
-    T = ys.shape[0]
-    D = A.shape[0]
-    ts = jnp.cumsum(dts)
-
-    # precompute exact OU transition dynamics and inverse cholesky factors
-    H = chol_H @ chol_H.T
-    Fs, chol_Qs = jax.vmap(lambda dt: ou_diag_transition(A, chol_Q, dt))(dts)
-    inv_chol_Q0 = solve_triangular(chol_Q0, jnp.eye(D), lower=True)
-    inv_chol_H0 = solve_triangular(chol_H0, jnp.eye(D), lower=True)
-
-    if style == "bootstrap":
-
-        ###################
-        #    filtering    #
-        ###################
-        def M0_rvs(key, _):
-            i = indices[0]
-            m0 = jnp.zeros((N+1, D))
-            eps_z, eps_eta = jr.normal(key, shape=(2, N+1))
-            
-            # log half-spread
-            P_pred_z = chol_Q0 @ chol_Q0.T 
-            z_i = eps_z * jnp.sqrt(P_pred_z[i, i])
-
-            # mid-YtB
-            P_pred_eta = chol_H0 @ chol_H0.T 
-            eta_i = eps_eta * jnp.sqrt(P_pred_eta[i, i])
-            
-            u0 = (z_i, eta_i)
-            m_pred = (m0, m0)
-            P_pred = (P_pred_z, P_pred_eta)
-            return u0, m_pred, P_pred
-        
-        def Mt_rvs(key, x_t_m_1, P_t_m_1, params):
-            """
-            Parameters
-            ----------
-            x_t_m_1:  (means_z, means_eta) where, for particles N and dimension D,
-                        - means_z:   (N, D)
-                        - means_eta: (N, D)
-            P_t_m_1:  (P_pred_z, P_pred_eta) where
-                        - P_z:    (D, D)
-                        - P_eta:  (D, D)
-            """
-            _, _, i_t, F_t, chol_Q_t, dt = params
-            z_t_m_1, eta_t_m_1 = x_t_m_1
-            P_z, P_eta = P_t_m_1
-            eps_z, eps_eta = jr.normal(key, shape=(2, N+1))
-
-            # sample log half-spread at index i
-            Q = chol_Q_t @ chol_Q_t.T
-            P_pred_z = (F_t @ P_z @ F_t.T) + Q
-            m_pred_z = z_t_m_1 @ F_t.T
-            z_i = m_pred_z[:, i_t] + eps_z * jnp.sqrt(P_pred_z[i_t, i_t])
-
-            # sample mid-YtB for index id
-            P_pred_eta = P_eta + (dt * H)
-            m_pred_eta = eta_t_m_1
-            eta_i = m_pred_eta[:, i_t] + eps_eta * jnp.sqrt(P_pred_eta[i_t, i_t])
-
-            u_t = (z_i, eta_i)
-            m_pred_t = (m_pred_z, m_pred_eta)
-            P_pred_t = (P_pred_z, P_pred_eta)
-            return u_t, m_pred_t, P_pred_t
-        
-        def G_0(u):
-            i = indices[0]
-            z_i, eta_i = u
-            val = log_potential(i, ys[0], z_i, eta_i, obs_types[0], alpha[i], psi, chol_R)
-            return val
-        
-        def G_t(x_t_m_1, u_t, params):
-            y_t, obs_type_t, i_t, *_ = params
-            z_i, eta_i = u_t
-            val = log_potential(i_t, y_t, z_i, eta_i, obs_type_t, alpha[i_t], psi, chol_R)
-            return val
-        
-        ###################
-        #    smoothing    #
-        ###################
-        def M0_logpdf(x):
-            # need to implement the backward sampling stuff from Adrien here
-            # t=0 half log-spreads logpdf
-            z, eta = x
-            m0 = jnp.zeros((N+1, D))
-            val = mvn_logpdf(z, m0, None, chol_inv=inv_chol_Q0, constant=False)
-            val += mvn_logpdf(eta, m0, None, chol_inv=inv_chol_H0, constant=False)
-            return val
-
-        def Mt_logpdf(x_t_m_1, P_t_m_1, x_t, params):
-            """
-            Log PDF calculated over whole vector x_t rather than single coords u_t = (z_i, eta_i)
-            """
-            # need to implement the backward sampling stuff from Adrien here
-            _, _, i_t, F_t, chol_Q_t, dt = params
-            z_t_m_1, eta_t_m_1 = x_t_m_1
-            z_t, eta_t = x_t
-            P_z, P_eta = P_t_m_1
-
-            # calculate log half-spread logpdf
-            m_pred_z = z_t_m_1 @ F_t.T
-            Q = chol_Q_t @ chol_Q_t.T
-            P_pred_z = (F_t @ P_z @ F_t.T) + Q
-            chol_P_pred_z = jnp.linalg.cholesky(P_pred_z)
-            inv_chol_P_pred_z = solve_triangular(chol_P_pred_z, jnp.eye(D), lower=True)
-            val = mvn_logpdf(z_t, m_pred_z, None, chol_inv=inv_chol_P_pred_z, constant=False)
-
-            # calculate mid-YtB logpdf
-            m_pred_eta = eta_t_m_1
-            P_pred_eta = P_eta + (dt * H)
-            chol_P_pred_eta = jnp.linalg.cholesky(P_pred_eta)
-            inv_chol_P_pred_eta = solve_triangular(chol_P_pred_eta, jnp.eye(D), lower=True)
-            val += mvn_logpdf(eta_t, m_pred_eta, None, chol_inv=inv_chol_P_pred_eta, constant=False)
-
-            m_pred = (m_pred_z, m_pred_eta)
-            P_pred = (P_pred_z, P_pred_eta)
-            return val, m_pred, P_pred
-        
-        def Gamma_t(x_t_m_1, P_t_m_1, x_t, params):
-            _, _, i_t, F_t, chol_Q_t, dt = params
-            P_z, P_eta = P_t_m_1
-            z_t, eta_t = x_t
-            z_t_m_1, eta_t_m_1 = x_t_m_1
-
-            val, m_pred, P_pred = Mt_logpdf(x_t_m_1, P_t_m_1, x_t, params)
-            # u_t = tree_map(lambda u: u[i_t], x_t)
-            # val += G_t(x_t_m_1, u_t, params)
-            
-            m_pred_z, m_pred_eta = m_pred
-            P_pred_z, P_pred_eta = P_pred
-
-            J_z = P_z @ F_t.T @ jnp.linalg.inv(P_pred_z)
-            m_smooth_z = z_t_m_1 + (z_t - m_pred_z) @ J_z.T
-            P_smooth_z = P_z - J_z @ P_pred_z @ J_z.T
-            P_smooth_z = 0.5 * (P_smooth_z + P_smooth_z.T)
-
-            J_eta = P_eta @ jnp.linalg.inv(P_pred_eta)
-            m_smooth_eta = eta_t_m_1 + (eta_t - m_pred_eta) @ J_eta.T
-            P_smooth_eta = P_eta - J_eta @ P_eta
-            P_smooth_eta = 0.5 * (P_smooth_eta + P_smooth_eta.T)
-
-            m_smooth = (m_smooth_z, m_smooth_eta)
-            P_smooth = (P_smooth_z, P_smooth_eta)
-            return val, m_smooth, P_smooth
+        return kernel
 
 
-    inps = (ys[1:], obs_types[1:], indices[1:], Fs[1:], chol_Qs[1:], dts[1:]) 
-    M0 = M0_rvs, M0_logpdf
-    Mt = Mt_rvs, Mt_logpdf, inps
-    G_t_plus_params = G_t, inps
-    Gamma_t_plus_params = Gamma_t, inps
 
-    init = lambda x: (x, jnp.zeros((T,), dtype=int))
-    kernel = lambda key, state, *_: rb_csmc.kernel(
-        key, 
-        state[0], 
-        state[1], 
-        indices,
-        M0, 
-        G_0, 
-        Mt, 
-        G_t_plus_params,
-        Gamma_t_plus_params,
-        N=N+1, 
-        **kwargs
-    )
+###################################################
+#       Rao-Blackwellised Feynman-Kac Model       #
+###################################################
 
-    return kernel, init
-        
-def get_gueant_csmc_kernel(
-        obs, 
-        A: Array, 
-        psi: Array,
-        chol_P0_z: Array,
-        chol_P0_eta: Array,
-        chol_Q_z: Array, 
-        chol_Q_eta: Array, 
-        chol_R: Array, 
-        N, 
-        dts, 
-        style="guided", 
-        **kwargs
-    ):
-    return None 
+class RBcSMC(FeynmanKac):
 
+    name: str = "RB_CSMC"
+
+    def __init__(
+            self, 
+            N: int,
+            D: int,
+            dts: Array, 
+        ):
+        """
+        Parameters
+        ----------
+        N:    Number of particles
+        D:    Latent state dimension
+        dts:  (K-1, D) transition times has K-1 length where K is number of observations
+        """
+
+        self.N = N
+        self.D = D
+        self.dts = dts
+
+    def M0_rvs(self, params, key, _, inp):
+        """ Only propose particles for the observed coordinate """
+
+        Q0 = params["Q0"]
+        H0 = params["H0"]
+        m0 = params["m0"]
+
+        data_0 = inp[-1]
+        i = data_0[1]
+
+        D = Q0.shape[-1]
+        z_m0 = jnp.zeros((self.N+1, D))
+        eta_m0 = jnp.broadcast_to(m0, shape=(self.N+1, D))
+
+        eps_z, eps_eta = jr.normal(key, shape=(2, self.N+1))
+        z_i = eps_z * jnp.sqrt(Q0[i, i])
+        eta_i = eta_m0[:, i] + eps_eta * jnp.sqrt(H0[i, i])
+
+        return (z_i, eta_i), (z_m0, eta_m0), (Q0, H0)
+
+    def Mt_rvs(self, params, key, x_t_m_1, P_t_m_1, inp):
+        """
+        Parameters
+        ----------
+        xp:  (z_t_m_1, eta_t_m_1) where
+                - z_t_m_1:   (N, D)
+                - eta_t_m_1: (N, D)
+        """
+        H = params["H"]
+        F_t, chol_Q_t, dt, data_t = inp
+        i_t = data_t[1]
+
+        z_t_m_1, eta_t_m_1 = x_t_m_1
+        Q_t_m_1, H_t_m_1 = P_t_m_1
+        eps_z, eps_eta = jr.normal(key, shape=(2, self.N+1))
+
+        # sample log half-spread at index i_t
+        Q = chol_Q_t @ chol_Q_t.T
+        Q_pred = (F_t @ Q_t_m_1 @ F_t.T) + Q                               # filter covariance
+        m_pred_z = z_t_m_1 @ F_t.T                                         # predictive mean over all bond spreads
+        z_i = m_pred_z[:, i_t] + eps_z * jnp.sqrt(Q_pred[i_t, i_t])
+
+        # sample mid YtB for index i_t
+        H_pred = H_t_m_1 + (dt * H)                                        # filter covariance
+        m_pred_eta = eta_t_m_1                                             # predictive mean over all mid prices
+        eta_i = m_pred_eta[:, i_t] + eps_eta * jnp.sqrt(H_pred[i_t, i_t])
+
+        u_t = (z_i, eta_i)
+        m_pred_t = (m_pred_z, m_pred_eta)
+        P_pred_t = (Q_pred, H_pred)
+        return u_t, m_pred_t, P_pred_t
+
+    def M0_logpdf(self, params, x0, inp, constant: bool):
+        """ Implement logpdf for t=0 proposal kernel """
+        return log_p0(params, x0, constant=constant)
+
+    def Mt_logpdf(self, params, x_t_m_1, P_t_m_1, x_t, inp, constant: bool): 
+        """ Implement logpdf for Markov proposal kernel """
+        H = params["H"]
+        F_t, chol_Q_t, dt, _ = inp
+        z_t_m_1, eta_t_m_1 = x_t_m_1
+        z_t, eta_t = x_t
+        Q_t_m_1, H_t_m_1 = P_t_m_1
+
+        D = z_t_m_1.shape[-1]
+
+        # calculate log half-spread logpdf
+        Q = chol_Q_t @ chol_Q_t.T
+        Q_pred = (F_t @ Q_t_m_1  @ F_t.T) + Q
+        chol_Q_pred = jnp.linalg.cholesky(Q_pred)
+        inv_chol_Q_pred = solve_triangular(chol_Q_pred, jnp.eye(D), lower=True)
+        m_pred_z = z_t_m_1 @ F_t.T
+        val = mvn_logpdf(z_t, m_pred_z, None, chol_inv=inv_chol_Q_pred, constant=True)
+
+        # calculate mid-YtB logpdf
+        H_pred = H_t_m_1 + (dt * H)
+        chol_H_pred = jnp.linalg.cholesky(H_pred)
+        inv_chol_H_pred = solve_triangular(chol_H_pred, jnp.eye(D), lower=True)
+        m_pred_eta = eta_t_m_1
+        val += mvn_logpdf(eta_t, m_pred_eta, None, chol_inv=inv_chol_H_pred, constant=True)
+
+        return val
+
+    def G0_logpdf(self, params, x0, inp):
+        data = inp[-1]
+        return log_ht(params, x0, data)
+
+    def Gt_logpdf(self, params, x, inp):
+        """ Implement logpdf for potential function """
+        data = inp[-1]
+        return log_ht(params, x, data)
+
+    def rts(self, params, x_t_m_1, P_t_m_1, x_t, inp):
+        """
+        Calculate p(x_{t-1} | x_t, u_{0:t-1}) for each particle.
+
+        Parameters
+        ----------
+        x_t_m_1:  Tuple of filtered means at time t-1.
+        P_t_m_1:  Tuple of filtered covariances at time t-1.
+        x_t:      Sampled full state at time t.
+        inp:      Transition inputs for time t.
+
+        Returns
+        -------
+        m_smooth: Tuple of particle-dependent smoothing means.
+        P_smooth: Tuple of particle-independent smoothing covariances.
+        """
+        H = params["H"]
+        F_t, chol_Q_t, dt, _ = inp
+
+        z_t, eta_t = x_t
+        z_t_m_1, eta_t_m_1 = x_t_m_1
+        Q_t_m_1, H_t_m_1 = P_t_m_1
+
+        # log half-spread RTS update
+        Q_t = chol_Q_t @ chol_Q_t.T
+        Q_pred = F_t @ Q_t_m_1 @ F_t.T + Q_t
+        m_pred_z = z_t_m_1 @ F_t.T
+
+        J_z = Q_t_m_1 @ F_t.T @ jnp.linalg.inv(Q_pred)
+        m_smooth_z = z_t_m_1 + (z_t - m_pred_z) @ J_z.T
+        Q_smooth = Q_t_m_1 - J_z @ Q_pred @ J_z.T
+
+        # mid-YtB RTS update
+        H_pred = H_t_m_1 + dt * H
+        m_pred_eta = eta_t_m_1
+
+        J_eta = H_t_m_1 @ jnp.linalg.inv(H_pred)
+        m_smooth_eta = eta_t_m_1 + (eta_t - m_pred_eta) @ J_eta.T
+        H_smooth = H_t_m_1 - J_eta @ H_pred @ J_eta.T
+
+        # enforce symmetry
+        Q_smooth = 0.5 * (Q_smooth + Q_smooth.T)
+        H_smooth = 0.5 * (H_smooth + H_smooth.T)
+
+        m_smooth = (m_smooth_z, m_smooth_eta)
+        P_smooth = (Q_smooth, H_smooth)
+        return m_smooth, P_smooth
+
+    def init(self, key: PRNGKey, params: dict, data: tuple[Array], **kwargs):
+        """
+        I know apriori the latent state is two components 
+            x = (z, eta)
+        where z and eta have the same dimensions.
+
+        Parameters 
+        ----------
+        key:       RNG
+        data:      Tuple containing all observation modalities (ie bond idx, trade price etc)
+        **kwargs:  Extra keywords for specific kernel being used
+
+        Returns
+        -------
+        state:     (xs, Bs) for states and (backward) ancestors
+        """
+        # init a dummy state
+        K = self.dts.shape[0] + 1  # number of time increments
+        dummy_x = (jnp.zeros((K, self.D)), jnp.zeros((K, self.D)))
+        dummy_state = (dummy_x, jnp.zeros((K,), dtype=int))
+
+        # pass dummy state into an unconditional SMC run (state only used for shape)
+        kernel = self.get_kernel(params, dummy_state, data, conditional=False, **kwargs)
+        xs, Bs, log_ws = kernel(key)
+        return (xs, Bs)
+
+    def get_kernel(
+            self,
+            params: dict,
+            state: Array,
+            data: tuple[Array],
+            conditional: bool,
+            **kwargs
+        ):
+        A = params["A"]
+        Q = params["Q"]
+        Fs, chol_Qs = vmap(lambda dt: ou_diag_transition(A, Q, dt))(self.dts)
+
+        inp_0 = tree_map(lambda x: x[0], data),
+        inps = Fs, chol_Qs, self.dts, tree_map(lambda x: x[1:], data)
+        indices = data[1]
+
+        M_0_rvs = lambda key, N: self.M0_rvs(params, key, N, inp_0)
+        G_0 = lambda x: self.G0_logpdf(params, x, inp_0)
+
+        M_t_rvs = lambda key, xp, Pp, inp: self.Mt_rvs(params, key, xp, Pp, inp)
+        G_t = lambda xp, x, inp: self.Gt_logpdf(params, x, inp)
+        M_t_logpdf = lambda xp, Pp, x, inp: self.Mt_logpdf(params, xp, Pp, x, inp, constant=True)
+        rts_func = lambda xp, Pp, x, inp: self.rts(params, xp, Pp, x, inp)
+
+        return lambda key: rb_csmc.kernel(
+            key, state[0], state[1],
+            indices,
+            M_0_rvs, G_0, M_t_rvs, G_t,
+            M_t_logpdf, rts_func,
+            inps,
+            N=self.N, conditional=conditional,
+            **kwargs
+        )
+
+
+class GueantCSMC(FeynmanKac):
+
+    name: str = "GUEANT"
+
+    def __init__(
+            self,
+            N: int,
+            D: int,
+            dts: Array,
+        ):
+        """
+        Parameters
+        ----------
+        N:    Number of particles excluding the retained reference particle
+        D:    Latent state dimension
+        dts:  (K-1,) transition times where K is the number of observations
+        """
+        self.N = N
+        self.D = D
+        self.dts = dts
+
+    def M0_rvs(self, params, key, _, inp):
+        """ Sample from the initial full-state distribution """
+        Q0 = params["Q0"]
+        H0 = params["H0"]
+        m0 = params["m0"]
+
+        key_z, key_eta = jr.split(key)
+        chol_Q0 = jnp.linalg.cholesky(Q0)
+        chol_H0 = jnp.linalg.cholesky(H0)
+
+        z_0 = jr.normal(key_z, shape=(self.N+1, self.D)) @ chol_Q0.T
+        eta_0 = m0 + jr.normal(key_eta, shape=(self.N+1, self.D)) @ chol_H0.T
+        return z_0, eta_0
+
+    def Mt_rvs(self, params, key, xp, inp):
+        return None
+
+    def M0_logpdf(self, params, x0, inp, constant: bool):
+        """ Evaluate the initial full-state density """
+        return log_p0(params, x0, constant=constant)
+
+    def Mt_logpdf(self, params, x_t_m_1, x_t, inp, constant: bool):
+        """ Evaluate the full-state transition density """
+        _, _, dt, _ = inp
+        return log_pt(params, x_t_m_1, x_t, dt=dt, constant=constant)
+
+    def G0_logpdf(self, params, x0, inp):
+        """ Evaluate the initial emission density """
+        data = inp[-1]
+        return log_ht(params, x0, data)
+
+    def Gt_logpdf(self, params, x_t, inp):
+        """ Evaluate the emission density """
+        data = inp[-1]
+        return log_ht(params, x_t, data)
+
+    def Gamma_0_logpdf(self, params, x0, inp):
+        """ Evaluate the initial unnormalised Feynman-Kac density """
+        return self.M0_logpdf(params, x0, inp, constant=True) + self.G0_logpdf(params, x0, inp)
+
+    def Gamma_t_logpdf(self, params, x_t_m_1, x_t, inp):
+        """ Evaluate the subsequent unnormalised Feynman-Kac density """
+        return self.Mt_logpdf(params, x_t_m_1, x_t, inp, constant=True) + self.Gt_logpdf(params, x_t, inp)
+
+    def init(self, key: PRNGKey, params: dict, data: tuple[Array], **kwargs):
+        """
+        Initialise the retained trajectory using an unconditional SMC run.
+        """
+        K = self.dts.shape[0] + 1
+        dummy_x = (jnp.zeros((K, self.D)), jnp.zeros((K, self.D)))
+        dummy_state = (dummy_x, jnp.zeros((K,), dtype=int))
+
+        kernel = self.get_kernel(params, dummy_state, data, conditional=False, **kwargs)
+        xs, Bs, log_ws = kernel(key)
+        return xs, Bs
+
+    def get_kernel(
+            self,
+            params: dict,
+            state,
+            data: tuple[Array],
+            conditional: bool,
+            **kwargs
+        ):
+        A = params["A"]
+        Q = params["Q"]
+        H = params["H"]
+        R = params["R"]
+        alpha = params["alpha"]
+        psi = params["psi"]
+
+        chol_H = jnp.linalg.cholesky(H)
+        chol_R = jnp.linalg.cholesky(R)
+        Fs, chol_Qs = vmap(lambda dt: ou_diag_transition(A, Q, dt))(self.dts)
+
+        inp_0 = tree_map(lambda x: x[0], data),
+        inps = Fs, chol_Qs, self.dts, tree_map(lambda x: x[1:], data),
+
+        M_0_rvs = lambda key, N: self.M0_rvs(params, key, N, inp_0)
+        M_0_logpdf = lambda x: self.M0_logpdf(params, x, inp_0, constant=True)
+        Gamma_0 = lambda x: self.Gamma_0_logpdf(params, x, inp_0)
+        Gamma_t = lambda xp, x, inp: self.Gamma_t_logpdf(params, xp, x, inp)
+
+        M_0 = M_0_rvs, M_0_logpdf
+        Gamma_t_plus_params = Gamma_t, inps
+
+        return lambda key: gueant.kernel(
+            key, state[0], state[1],
+            M_0, Gamma_0,
+            inps, Gamma_t_plus_params,
+            chol_H, chol_R, alpha, psi,
+            N=self.N+1, conditional=conditional,
+            **kwargs
+        )

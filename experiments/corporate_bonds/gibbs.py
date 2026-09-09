@@ -9,6 +9,7 @@ from jax.scipy.linalg import solve
 from rbsmc.utils.horseshoe import Horseshoe
 from rbsmc.bayesian.gibbs import ConjugateBlock, ConditionalBlock, GibbsContext
 from rbsmc.bayesian.dists import GaussianNatParam, InverseGammaNatParam
+from rbsmc.bayesian.metropolis import RandomWalkMetropolis
 
 ##########################
 #     horseshoe prior    #
@@ -292,4 +293,162 @@ def _construct_Q_block(D, concentration: float = 1.0, scale: float = 1.0):
         prior=prior,
         likelihood=_likelihood,
         unpack=_unpack,
+    )
+
+
+def _construct_A_block(
+        D,
+        mean=0.0,
+        variance=1.0,
+        proposal_variance=0.01,
+):
+
+    mean = jnp.broadcast_to(jnp.asarray(mean), (D,))
+    covariance = variance * jnp.eye(D)
+    precision = solve(covariance, jnp.eye(D))
+    prior = GaussianNatParam(precision=precision, precision_mean=precision @ mean)
+
+    def _likelihood(context: GibbsContext):
+        zs, _ = context.trajectory
+        A = jnp.diag(context.params["A"])
+        Q = jnp.diag(context.params["Q"])
+        dts = context.dts[:, None]
+
+        x = dts * A[None, :]
+        safe_x = jnp.where(jnp.abs(x) < 1e-8, 1.0, x)
+
+        ratios = -jnp.expm1(-2 * x) / (2 * safe_x)
+        constants = dts * jnp.where(jnp.abs(x) < 1e-8, 1.0, ratios)
+
+        means = jnp.exp(-x) * zs[:-1]
+        residuals = zs[1:] - means
+        variances = constants * Q[None, :]
+
+        return -0.5 * jnp.sum(jnp.log(2 * jnp.pi * variances) + residuals**2 / variances)
+
+    def _unpack(sample: Array):
+        return {
+            "log_A": sample,
+            "A": jnp.diag(jnp.exp(sample)),
+        }
+
+    return RandomWalkMetropolis(
+        name="log_A",
+        prior=prior,
+        likelihood=_likelihood,
+        unpack=_unpack,
+        covariance=proposal_variance * jnp.eye(D),
+    )
+
+
+def _construct_PSI_block(
+        D,
+        mean=0.0,
+        variance=1.0,
+        proposal_variance=0.01,
+):
+
+    mean = jnp.broadcast_to(jnp.asarray(mean), (D,))
+    covariance = variance * jnp.eye(D)
+    precision = solve(covariance, jnp.eye(D))
+    prior = GaussianNatParam(precision=precision, precision_mean=precision @ mean)
+
+    def _likelihood(context: GibbsContext):
+        obs_values, bond_idxs, event_types = context.data
+        zs, etas = context.trajectory
+
+        PSI = context.params["psi"]
+        R = context.params["R"]
+
+        indices = jnp.arange(obs_values.shape[0])
+        observed_zs = zs[indices, bond_idxs]
+        observed_etas = etas[indices, bond_idxs]
+        variances = jnp.diag(R)[bond_idxs]
+        half_spreads = PSI[bond_idxs] * jnp.exp(observed_zs)
+
+        means = jnp.where(
+            event_types == 0,
+            observed_etas - half_spreads,
+            observed_etas + half_spreads,
+        )
+
+        log_likelihoods = -0.5 * (jnp.log(2 * jnp.pi * variances) + (obs_values - means)**2 / variances)
+
+        # D2D observations do not depend on PSI
+        return jnp.sum(jnp.where(event_types < 2, log_likelihoods, 0.0))
+
+    def _unpack(sample: Array):
+        return {
+            "log_psi": sample,
+            "psi": jnp.exp(sample),
+        }
+
+    return RandomWalkMetropolis(
+        name="log_psi",
+        prior=prior,
+        likelihood=_likelihood,
+        unpack=_unpack,
+        covariance=proposal_variance * jnp.eye(D),
+    )
+
+
+def _construct_ALPHA_block(
+        D,
+        mean=0.0,
+        variance=1.0,
+        proposal_variance=0.01,
+):
+
+    mean = jnp.broadcast_to(jnp.asarray(mean), (D,))
+    covariance = variance * jnp.eye(D)
+    precision = solve(covariance, jnp.eye(D))
+    prior = GaussianNatParam(precision=precision, precision_mean=precision @ mean)
+
+    def _log_normal_interval(lower: Array, upper: Array):
+        """
+        For intervals above zero, use symmetry so that both CDF arguments
+        lie in the negative half-line and their logarithms remain distinct.
+        """
+        reflect = lower > 0
+        reflected_lower = jnp.where(reflect, -upper, lower)
+        reflected_upper = jnp.where(reflect, -lower, upper)
+
+        log_cdf_lower = jax.scipy.special.log_ndtr(reflected_lower)
+        log_cdf_upper = jax.scipy.special.log_ndtr(reflected_upper)
+
+        return log_cdf_upper + jnp.log(-jnp.expm1(log_cdf_lower - log_cdf_upper))
+        
+
+    def _likelihood(context: GibbsContext):
+        obs_values, bond_idxs, event_types = context.data
+        _, etas = context.trajectory
+
+        alpha = context.params["alpha"]
+        variances = jnp.diag(context.params["R"])
+
+        indices = jnp.arange(obs_values.shape[0])
+        observed_etas = etas[indices, bond_idxs]
+        stds = jnp.sqrt(variances[bond_idxs])
+        observed_alphas = alpha[bond_idxs]
+
+        lower = (obs_values - observed_alphas - observed_etas) / stds
+        upper = (obs_values + observed_alphas - observed_etas) / stds
+
+        log_likelihoods = _log_normal_interval(lower, upper) - jnp.log(2 * observed_alphas)
+
+        # Only D2D observations depend on alpha
+        return jnp.sum(jnp.where(event_types == 2, log_likelihoods, 0.0))
+
+    def _unpack(sample: Array):
+        return {
+            "log_alpha": sample,
+            "alpha": jnp.exp(sample),
+        }
+
+    return RandomWalkMetropolis(
+        name="log_alpha",
+        prior=prior,
+        likelihood=_likelihood,
+        unpack=_unpack,
+        covariance=proposal_variance * jnp.eye(D),
     )
