@@ -203,46 +203,7 @@ experiment_name = experiment_name.format(
 dirpath = f"results/{experiment_name}"
 datapath = f"{dirpath}/data.npz"
 if not os.path.exists(datapath):
-    unthinned_name = "kernel={},D={},T={},steps={},phi={},N={},samples={},burnin={},full-inference={},conditional={},seed={},backward-mode={}"
-    unthinned_name = unthinned_name.format(
-        args.kernel,
-        args.D,
-        args.T,
-        args.steps,
-        args.phi,
-        args.N,
-        args.samples,
-        args.burnin,
-        args.full_inference,
-        args.conditional,
-        args.seed,
-        backward_mode,
-    )
-    legacy_name = "kernel={},D={},T={},steps={},phi={},N={},samples={},burnin={},full-inference={},conditional={},seed={}"
-    legacy_name = legacy_name.format(
-        args.kernel,
-        args.D,
-        args.T,
-        args.steps,
-        args.phi,
-        args.N,
-        args.samples,
-        args.burnin,
-        args.full_inference,
-        args.conditional,
-        args.seed,
-    )
-    candidates = [
-        (f"results/{unthinned_name}", f"results/{unthinned_name}/data.npz"),
-        (f"results/{legacy_name}", f"results/{legacy_name}/data.npz"),
-    ]
-    for candidate_dir, candidate_path in candidates:
-        if os.path.exists(candidate_path):
-            dirpath = candidate_dir
-            datapath = candidate_path
-            break
-    else:
-        raise FileNotFoundError(f"Could not find saved data at {datapath}")
+    raise FileNotFoundError(f"Could not find saved data at {datapath}")
 
 plotpath = f"{dirpath}/plots"
 os.makedirs(plotpath, exist_ok=True)
