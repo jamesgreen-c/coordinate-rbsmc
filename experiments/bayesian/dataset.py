@@ -2,6 +2,9 @@ import jax.numpy as jnp
 import numpy as np
 
 from jax import Array
+from scipy.optimize import minimize
+from scipy.linalg import solve_continuous_lyapunov
+
 from rbsmc.utils.dataset import Dataset
 
 
@@ -11,23 +14,38 @@ from rbsmc.utils.dataset import Dataset
 
 class CorporateBondDataset(Dataset):
     data: tuple[Array, ...]
-    states: Array
+    states: tuple[Array, Array]
     params: dict[str, Array]
+    CBBT: Array
 
 
-    def __init__(self, D: int, dts: Array, **kwargs):
+    def __init__(
+            self, 
+            D: int, 
+            dts: Array, 
+            cbbt: Array,
+            standardised: bool = False, 
+            means: Array | None = None, 
+            stds: Array | None = None, 
+            **kwargs
+        ):
         self.dts = dts
+        self.CBBT = cbbt
         self.D = D
-        self.means = None
-        self.stds = None
+        self.standardised = standardised
+        self.means = means
+        self.stds = stds
         super().__init__(**kwargs)
 
     @property
     def standardised_data(self):
         """
-        Standardise each bond using an observation-based estimate of its
-        mid-YtB diffusion standard deviation.
+        Return a new dataset standardised using an observation-based estimate
+        of each bond's mid-YtB diffusion standard deviation.
         """
+        if self.standardised:
+            return self
+
         obs_values, bond_idxs, event_types = self.data
 
         obs_values_np = np.asarray(obs_values)
@@ -90,93 +108,203 @@ class CorporateBondDataset(Dataset):
 
             scales[d] = np.sqrt(variance)
 
-        self.means = jnp.asarray(means, dtype=obs_values.dtype)
-        self.stds = jnp.asarray(scales, dtype=obs_values.dtype)
+        means = jnp.asarray(means, dtype=obs_values.dtype)
+        stds = jnp.asarray(scales, dtype=obs_values.dtype)
+        inv_stds = 1 / stds
 
-        std_obs_values = (obs_values - self.means[bond_idxs]) / self.stds[bond_idxs]
+        std_obs_values = (obs_values - means[bond_idxs]) / stds[bond_idxs]
+        std_cbbt = (self.CBBT - means[bond_idxs]) / stds[bond_idxs]
 
-        return std_obs_values, bond_idxs, event_types
+        eta, z = self.states
+        std_states = ((eta - means) / stds, z)
 
-    @property
-    def standardised_params(self):
-        """ 
-        Standardise all params.
-        Log half-spread dynamics are not standardised as they are unitless:
-            - The rescaling occurs through psi = psi / stds.
-        """
-        # TODO move means and std calculation to init? 
-        assert self.means is not None and self.stds is not None, "Standardise data first"
-
-        inv_stds = 1 / self.stds
-
-        # extract
-        # MEAN_M0 = self.params["mean_m0"]
-        # COV_M0 = self.params["cov_m0"]
-        # SCALE = self.params["scale"]
-        M0 = self.params["m0"]
-        H0 = self.params["H0"]
-        H = self.params["H"]
-        R = self.params["R"]
-        PSI = self.params["psi"]
-        ALPHA = self.params["alpha"]
-
-        # standardise
-        # MEAN_M0 = inv_stds * (MEAN_M0 - self.means)
-        # COV_M0 = inv_stds[:, None] * COV_M0 * inv_stds[None, :]
-        M0 = inv_stds * (M0 - self.means)
-
-        # SCALE = SCALE / self.stds
-        # SCALE = SCALE / (self.stds**2)
-
-        H0 = inv_stds[:, None] * H0 * inv_stds[None, :]
-
-        H = inv_stds[:, None] * H * inv_stds[None, :]
-        R = inv_stds[:, None] * R * inv_stds[None, :]
-        PSI = PSI / self.stds
-        ALPHA = ALPHA / self.stds
-        
-        standardised_params = {
+        std_params = {
             **self.params,
-            # "mean_m0": MEAN_M0,
-            # "cov_m0": COV_M0,
-            # "scale": SCALE,
-            "m0": M0,
-            "H0": H0,
-            "H": H,
-            "R": R,
-            "psi": PSI,
-            "alpha": ALPHA,
+            "m0": inv_stds * (self.params["m0"] - means),
+            "H0": inv_stds[:, None] * self.params["H0"] * inv_stds[None, :],
+            "H": inv_stds[:, None] * self.params["H"] * inv_stds[None, :],
+            "R": inv_stds[:, None] * self.params["R"] * inv_stds[None, :],
+            "psi": self.params["psi"] / stds,
+            "alpha": self.params["alpha"] / stds,
         }
-        return standardised_params
+
+        return CorporateBondDataset(
+            D=self.D,
+            dts=self.dts,
+            data=(std_obs_values, bond_idxs, event_types),
+            states=std_states,
+            params=std_params,
+            cbbt=std_cbbt,
+            standardised=True,
+            means=means,
+            stds=stds,
+        )
 
 
-    
-    # override standardisation
-    # @property
-    # def standardised_data(self):
-    #     """
-    #     Standardise each observation using the mean and standard deviation
-    #     of the observations belonging to the corresponding bond.
-    #     """
-    #     obs_values, bond_idxs, event_types = self.data
 
-    #     counts = jnp.bincount(bond_idxs, length=self.D)
+#########################################
+#       estimate params from data       # 
+#########################################
+def estimate_params_from_data(dataset: CorporateBondDataset, alpha_scale: float = 1.0, H0_scale: float = 1.0):
+    """
+    Initialise model parameters from standardised transaction and CBBT data.
 
-    #     if bool(jnp.any(counts == 0)):
-    #         missing = jnp.where(counts == 0)[0]
-    #         raise ValueError(f"Cannot standardise bonds with no observations: {missing}")
+    Q is restricted to diagonal because each bond is fitted independently.
+    H0 is calibrated rather than statistically estimated.
+    """
+    # dataset = dataset.standardised_data if not dataset.standardised else dataset
+    PSI, A, Q = _estimate_ou_params(dataset)
+    # M0, H, H0 = _estimate_mid_params(dataset, PSI, H0_scale)
 
-    #     sums = jnp.zeros(self.D, dtype=obs_values.dtype).at[bond_idxs].add(obs_values)
-    #     self.means = sums / counts
+    ALPHA = alpha_scale * PSI
+    Q0 = np.diag(np.diag(Q) / (2.0 * np.diag(A)))
+    # Q0 = solve_continuous_lyapunov(A, Q)
 
-    #     centred_obs = obs_values - self.means[bond_idxs]
-    #     squared_sums = jnp.zeros(self.D, dtype=obs_values.dtype).at[bond_idxs].add(centred_obs**2)
-    #     self.stds = jnp.sqrt(squared_sums / counts)
+    return {
+        # "m0": jnp.asarray(M0),
+        # "H0": jnp.asarray(H0),
+        # "H": jnp.asarray(H),
+        "Q0": jnp.asarray(Q0),
+        "Q": jnp.asarray(Q),
+        "A": jnp.asarray(A),
+        "psi": jnp.asarray(PSI),
+        "alpha": jnp.asarray(ALPHA),
+    }
 
-    #     if bool(jnp.any(self.stds == 0)):
-    #         constant = jnp.where(self.stds == 0)[0]
-    #         raise ValueError(f"Cannot standardise bonds with zero observation variance: {constant}")
 
-    #     std_obs_values = centred_obs / self.stds[bond_idxs]
+def _estimate_ou_params(dataset: CorporateBondDataset):
+    """
+    Fit independent OU processes to standardised transaction-CBBT
+    half-spread proxies.
+    """
 
-    #     return std_obs_values, bond_idxs, event_types
+    def _objective(theta, times, x):
+        log_A, log_Q = theta
+
+        A = np.exp(log_A)
+        Q = np.exp(log_Q)
+
+        Q0 = Q / (2.0 * A)
+        loss = 0.5 * (np.log(2.0 * np.pi * Q0) + x[0]**2 / Q0)
+
+        elapsed = np.diff(times)
+        F = np.exp(-A * elapsed)
+        Q_k = Q * (1.0 - np.exp(-2.0 * A * elapsed)) / (2.0 * A)
+        residuals = x[1:] - F * x[:-1]
+
+        return loss + 0.5 * np.sum(
+            np.log(2.0 * np.pi * Q_k) + residuals**2 / Q_k
+        )
+
+    std_obs_values, bond_idxs, event_types = dataset.data
+
+    trades = np.asarray(std_obs_values)
+    bond_idxs = np.asarray(bond_idxs)
+    std_cbbt = np.asarray(dataset.CBBT)
+    dts = np.asarray(dataset.dts)
+    times = np.concatenate((np.zeros(1), np.cumsum(dts)))
+
+    D = dataset.D
+
+    A = np.zeros((D, D))
+    Q = np.zeros((D, D))
+    PSI = np.zeros(D)
+
+    for d in range(D):
+        indices = np.flatnonzero(bond_idxs == d)
+
+        bond_trades = trades[indices]
+        bond_cbbt = std_cbbt[indices]
+        bond_times = times[indices]
+
+        psi_proxy = np.abs(bond_trades - bond_cbbt)
+        valid = np.isfinite(psi_proxy) & np.isfinite(bond_times) & (psi_proxy > 0)
+
+        psi_proxy = psi_proxy[valid]
+        bond_times = bond_times[valid]
+
+        if len(psi_proxy) < 3:
+            raise ValueError(f"Not enough valid spread proxies for bond {d}")
+
+        log_psi = np.log(np.maximum(psi_proxy, 1e-8))
+        log_PSI_d = np.median(log_psi)
+        x = log_psi - log_PSI_d
+
+        total_time = bond_times[-1] - bond_times[0]
+        min_A = 1.0 / total_time
+
+        theta_init = np.array([
+            np.log(max(1.0, min_A)),
+            np.log(0.1),
+        ])
+
+        result = minimize(
+            _objective,
+            theta_init,
+            args=(bond_times, x),
+            method="L-BFGS-B",
+            bounds=[
+                (np.log(min_A), np.log(1e3)),
+                (np.log(1e-8), np.log(1e3)),
+            ],
+        )
+
+        if not result.success or not np.all(np.isfinite(result.x)):
+            raise RuntimeError(f"OU estimation failed for bond {d}: {result.message}")
+        
+        log_A_d, log_Q_d = result.x
+
+        PSI[d] = np.exp(log_PSI_d)
+        A[d, d] = np.exp(log_A_d)
+        Q[d, d] = np.exp(log_Q_d)
+
+    # print(f"PSI: {PSI}")
+    # print(f"A: {A}")
+    # print(f"Q: {Q}")
+
+    return PSI, A, Q
+
+
+# def _estimate_mid_params(dataset: CorporateBondDataset, PSI: np.ndarray, H0_scale: float):
+#     """
+#     Initialise M0 and estimate diagonal H from standardised CBBT observations.
+
+#     H0 is calibrated to represent H0_scale typical half-spreads of initial
+#     uncertainty in each coordinate.
+#     """
+#     std_obs_values, bond_idxs, event_types = dataset.data
+
+#     bond_idxs = np.asarray(bond_idxs)
+#     cbbt = np.asarray(dataset.CBBT)
+#     dts = np.asarray(dataset.dts)
+#     times = np.concatenate((np.zeros(1), np.cumsum(dts)))
+
+#     M0 = np.zeros(dataset.D)
+#     H = np.zeros((dataset.D, dataset.D))
+
+#     for d in range(dataset.D):
+#         indices = np.flatnonzero((bond_idxs == d) & np.isfinite(cbbt))
+
+#         if len(indices) < 2:
+#             raise ValueError(f"Not enough finite CBBT observations for bond {d}")
+
+#         M0[d] = cbbt[indices[0]]
+
+#         elapsed = np.diff(times[indices])
+#         increments = np.diff(cbbt[indices])
+#         valid = np.isfinite(elapsed) & np.isfinite(increments) & (elapsed > 0)
+
+#         elapsed = elapsed[valid]
+#         increments = increments[valid]
+
+#         if len(elapsed) == 0:
+#             raise ValueError("No valid CBBT increments for bond {}".format(d))
+
+#         H[d, d] = np.mean(increments**2 / elapsed)
+
+#     if np.any(~np.isfinite(np.diag(H))) or np.any(np.diag(H) <= 0):
+#         raise ValueError("Could not estimate a positive diagonal H")
+
+#     H0 = np.diag((H0_scale * PSI)**2)
+
+#     return M0, H, H0

@@ -1,17 +1,20 @@
 import jax.numpy as jnp
+import jax.random as jr
+import jax
 
 from jax import vmap, Array
 from jax.random import PRNGKey
 from jax.scipy.linalg import solve
 
-from rbsmc.bayesian.gibbs import ConjugateBlock, ConditionalBlock, GibbsContext
 from rbsmc.utils.horseshoe import Horseshoe
+from rbsmc.bayesian.gibbs import ConjugateBlock, ConditionalBlock, GibbsContext
 from rbsmc.bayesian.dists import GaussianNatParam, InverseGammaNatParam
+from rbsmc.bayesian.metropolis import RandomWalkMetropolis
 
 ##########################
 #     horseshoe prior    #
 ##########################
-def make_blocks(D: int, infer_H: bool, infer_m0: bool, infer_H0: bool):
+def make_blocks(D: int, full_inference: bool = False):
     """
     
     Parameters
@@ -23,14 +26,21 @@ def make_blocks(D: int, infer_H: bool, infer_m0: bool, infer_H0: bool):
     m0_block = _construct_m0_block(D)
     H0_xi_block = _construct_auxiliary_H0_block(D)
     H0_block = _construct_H0_block(D)
+    R_block = _construct_R_block(D)
 
-    blocks = []
-    if infer_H:
-        blocks.append(H_block)
-    if infer_m0:
-        blocks.append(m0_block)
-    if infer_H0:
-        blocks.extend((H0_xi_block, H0_block))
+    blocks = [H_block] # , m0_block, H0_xi_block, H0_block, R_block]
+    # blocks = [] 
+
+    if full_inference:
+        # TODO: add optionality for inference on PSI, ALPHA, Q, Q0, R as well
+        A_block = None
+        Q_block = None
+        Q0_block = _construct_Q0_block(D)
+        PSI_block = None
+        ALPHA_block = None
+        blocks.extend([A_block, Q_block, Q0_block, PSI_block, ALPHA_block])
+        pass 
+    
     return blocks
 
 
@@ -117,32 +127,6 @@ def _construct_H0_block(D):
     )
 
 
-# def _construct_H0_block(D, concentration=1.0, scale=0.1):
-#     # TODO change to be 2 separate blocks using half-cauchy auxiliary prior
-
-#     alpha = jnp.full((D,), concentration)
-#     beta = jnp.full((D,), scale)
-#     _prior = InverseGammaNatParam(alpha=alpha, beta=beta)
-
-#     def _likelihood(context: GibbsContext):
-#         """
-#         Construct the likelihood p(eta_0 | m_0, H_0) as a InverseGamma function of H_0
-#         """
-#         m0 = context.params["m0"]
-#         eta1 = context.trajectory[1][0]
-#         return InverseGammaNatParam.from_gaussian(value=eta1, mean=m0)
-
-#     def _unpack(H0_diag: Array):
-#         return {"H0": jnp.diag(H0_diag)}
-
-#     return ConjugateBlock(
-#         name="H0",
-#         prior=_prior,
-#         likelihood=_likelihood,
-#         unpack=_unpack
-#     )
-
-
 def _construct_H_block(D):
 
     def _initialiser(key: PRNGKey):
@@ -181,4 +165,291 @@ def _construct_H_block(D):
         names=("H", "beta", "llambda", "nu", "tau", "xi",),
         initialiser=_initialiser,
         kernel=_kernel
+    )
+
+
+def _construct_R_block(D, concentration: float = 1.0, scale: float = 1.0):
+
+    concentration = jnp.full((D,), concentration)
+    scale = jnp.full((D,), scale)
+    prior = InverseGammaNatParam(alpha_plus_one=concentration + 1, beta=scale)
+
+    def _initialiser(key: PRNGKey):
+        variances = prior.dist_param.sample(key, ())
+        return {"R": jnp.diag(variances)}
+
+    def _kernel(key: PRNGKey, context: GibbsContext):
+        obs_values, bond_idxs, event_types = context.data
+        zs, etas = context.trajectory
+
+        PSI = context.params["psi"]
+        alpha = context.params["alpha"]
+        variances = jnp.diag(context.params["R"])
+
+        auxiliary_key, variance_key = jr.split(key)
+        auxiliary_keys = jr.split(auxiliary_key, obs_values.shape[0])
+
+        def _sample_auxiliary(key, y, event, i, z, eta):
+            half_spread = PSI[i] * jnp.exp(z[i])
+            std = jnp.sqrt(variances[i])
+
+            case_0 = lambda _: y + half_spread
+            case_1 = lambda _: y - half_spread
+
+            def case_2(_):
+                lower = (y - alpha[i] - eta[i]) / std
+                upper = (y + alpha[i] - eta[i]) / std
+                eps = jr.truncated_normal(key, lower, upper)
+                return eta[i] + std * eps
+
+            return jax.lax.switch(event, [case_0, case_1, case_2], operand=None)
+
+        auxiliaries = vmap(_sample_auxiliary)(
+            auxiliary_keys,
+            obs_values,
+            event_types,
+            bond_idxs,
+            zs,
+            etas,
+        )
+
+        eta_observed = etas[jnp.arange(etas.shape[0]), bond_idxs]
+        residuals = auxiliaries - eta_observed
+
+        ns = jnp.bincount(bond_idxs, length=D)
+        residual_sums = jnp.bincount(
+            bond_idxs,
+            weights=residuals**2,
+            length=D,
+        )
+
+        posterior_conc = concentration + 0.5 * ns
+        posterior_scale = scale + 0.5 * residual_sums
+        posterior = InverseGammaNatParam(alpha_plus_one=posterior_conc + 1, beta=posterior_scale)
+        variances = posterior.dist_param.sample(variance_key)
+
+        return {"R": jnp.diag(variances)}
+
+    return ConditionalBlock(
+        names=("R",),
+        initialiser=_initialiser,
+        kernel=_kernel,
+    )
+
+
+def _construct_Q0_block(D, concentration: float = 1.0, scale: float = 1.0):
+
+    concentration = jnp.full((D,), concentration)
+    scale = jnp.full((D,), scale)
+    prior = InverseGammaNatParam(alpha_plus_one=concentration + 1, beta=scale)
+
+    def _likelihood(context: GibbsContext):
+        zs, _ = context.trajectory
+        z0 = zs[0]
+        return InverseGammaNatParam.from_gaussian(value=z0, mean=jnp.zeros((D,)))
+
+    def _unpack(sample: Array):
+        return {"Q0": jnp.diag(sample)}
+
+    return ConjugateBlock(
+        name="Q0",
+        prior=prior,
+        likelihood=_likelihood,
+        unpack=_unpack,
+    )
+
+
+def _construct_Q_block(D, concentration: float = 1.0, scale: float = 1.0):
+
+    concentration = jnp.full((D,), concentration)
+    scale = jnp.full((D,), scale)
+    prior = InverseGammaNatParam(alpha_plus_one=concentration + 1, beta=scale)
+
+    def _likelihood(context: GibbsContext):
+        zs, _ = context.trajectory
+        A = jnp.diag(context.params["A"])                         # (D,)
+        dts = context.dts[:, None]                                # (K-1, 1)
+
+        means = jnp.exp(-dts * A[None, :]) * zs[:-1]              # (K-1, D)
+        residuals = zs[1:] - means                                # (K-1, D)
+
+        x = dts * A[None, :]
+        safe_x = jnp.where(jnp.abs(x) < 1e-8, 1.0, x)
+        ratios = -jnp.expm1(-2 * x) / (2 * safe_x)
+        constants = dts * jnp.where(jnp.abs(x) < 1e-8, 1.0, ratios)
+
+        likelihood_concentration = 0.5 * residuals.shape[0]
+        likelihood_scale = 0.5 * jnp.sum(residuals**2 / constants, axis=0)
+
+        return InverseGammaNatParam(
+            alpha_plus_one=jnp.full((D,), likelihood_concentration),
+            beta=likelihood_scale,
+        )
+
+    def _unpack(sample: Array):
+        return {"Q": jnp.diag(sample)}
+
+    return ConjugateBlock(
+        name="Q",
+        prior=prior,
+        likelihood=_likelihood,
+        unpack=_unpack,
+    )
+
+
+def _construct_A_block(
+        D,
+        mean=0.0,
+        variance=1.0,
+        proposal_variance=0.01,
+):
+
+    mean = jnp.broadcast_to(jnp.asarray(mean), (D,))
+    covariance = variance * jnp.eye(D)
+    precision = solve(covariance, jnp.eye(D))
+    prior = GaussianNatParam(precision=precision, precision_mean=precision @ mean)
+
+    def _likelihood(context: GibbsContext):
+        zs, _ = context.trajectory
+        A = jnp.diag(context.params["A"])
+        Q = jnp.diag(context.params["Q"])
+        dts = context.dts[:, None]
+
+        x = dts * A[None, :]
+        safe_x = jnp.where(jnp.abs(x) < 1e-8, 1.0, x)
+
+        ratios = -jnp.expm1(-2 * x) / (2 * safe_x)
+        constants = dts * jnp.where(jnp.abs(x) < 1e-8, 1.0, ratios)
+
+        means = jnp.exp(-x) * zs[:-1]
+        residuals = zs[1:] - means
+        variances = constants * Q[None, :]
+
+        return -0.5 * jnp.sum(jnp.log(2 * jnp.pi * variances) + residuals**2 / variances)
+
+    def _unpack(sample: Array):
+        return {
+            "log_A": sample,
+            "A": jnp.diag(jnp.exp(sample)),
+        }
+
+    return RandomWalkMetropolis(
+        name="log_A",
+        prior=prior,
+        likelihood=_likelihood,
+        unpack=_unpack,
+        covariance=proposal_variance * jnp.eye(D),
+    )
+
+
+def _construct_PSI_block(
+        D,
+        mean=0.0,
+        variance=1.0,
+        proposal_variance=0.01,
+):
+
+    mean = jnp.broadcast_to(jnp.asarray(mean), (D,))
+    covariance = variance * jnp.eye(D)
+    precision = solve(covariance, jnp.eye(D))
+    prior = GaussianNatParam(precision=precision, precision_mean=precision @ mean)
+
+    def _likelihood(context: GibbsContext):
+        obs_values, bond_idxs, event_types = context.data
+        zs, etas = context.trajectory
+
+        PSI = context.params["psi"]
+        R = context.params["R"]
+
+        indices = jnp.arange(obs_values.shape[0])
+        observed_zs = zs[indices, bond_idxs]
+        observed_etas = etas[indices, bond_idxs]
+        variances = jnp.diag(R)[bond_idxs]
+        half_spreads = PSI[bond_idxs] * jnp.exp(observed_zs)
+
+        means = jnp.where(
+            event_types == 0,
+            observed_etas - half_spreads,
+            observed_etas + half_spreads,
+        )
+
+        log_likelihoods = -0.5 * (jnp.log(2 * jnp.pi * variances) + (obs_values - means)**2 / variances)
+
+        # D2D observations do not depend on PSI
+        return jnp.sum(jnp.where(event_types < 2, log_likelihoods, 0.0))
+
+    def _unpack(sample: Array):
+        return {
+            "log_psi": sample,
+            "psi": jnp.exp(sample),
+        }
+
+    return RandomWalkMetropolis(
+        name="log_psi",
+        prior=prior,
+        likelihood=_likelihood,
+        unpack=_unpack,
+        covariance=proposal_variance * jnp.eye(D),
+    )
+
+
+def _construct_ALPHA_block(
+        D,
+        mean=0.0,
+        variance=1.0,
+        proposal_variance=0.01,
+):
+
+    mean = jnp.broadcast_to(jnp.asarray(mean), (D,))
+    covariance = variance * jnp.eye(D)
+    precision = solve(covariance, jnp.eye(D))
+    prior = GaussianNatParam(precision=precision, precision_mean=precision @ mean)
+
+    def _log_normal_interval(lower: Array, upper: Array):
+        """
+        For intervals above zero, use symmetry so that both CDF arguments
+        lie in the negative half-line and their logarithms remain distinct.
+        """
+        reflect = lower > 0
+        reflected_lower = jnp.where(reflect, -upper, lower)
+        reflected_upper = jnp.where(reflect, -lower, upper)
+
+        log_cdf_lower = jax.scipy.special.log_ndtr(reflected_lower)
+        log_cdf_upper = jax.scipy.special.log_ndtr(reflected_upper)
+
+        return log_cdf_upper + jnp.log(-jnp.expm1(log_cdf_lower - log_cdf_upper))
+        
+
+    def _likelihood(context: GibbsContext):
+        obs_values, bond_idxs, event_types = context.data
+        _, etas = context.trajectory
+
+        alpha = context.params["alpha"]
+        variances = jnp.diag(context.params["R"])
+
+        indices = jnp.arange(obs_values.shape[0])
+        observed_etas = etas[indices, bond_idxs]
+        stds = jnp.sqrt(variances[bond_idxs])
+        observed_alphas = alpha[bond_idxs]
+
+        lower = (obs_values - observed_alphas - observed_etas) / stds
+        upper = (obs_values + observed_alphas - observed_etas) / stds
+
+        log_likelihoods = _log_normal_interval(lower, upper) - jnp.log(2 * observed_alphas)
+
+        # Only D2D observations depend on alpha
+        return jnp.sum(jnp.where(event_types == 2, log_likelihoods, 0.0))
+
+    def _unpack(sample: Array):
+        return {
+            "log_alpha": sample,
+            "alpha": jnp.exp(sample),
+        }
+
+    return RandomWalkMetropolis(
+        name="log_alpha",
+        prior=prior,
+        likelihood=_likelihood,
+        unpack=_unpack,
+        covariance=proposal_variance * jnp.eye(D),
     )

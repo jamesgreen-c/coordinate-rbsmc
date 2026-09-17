@@ -58,28 +58,19 @@ def emission(
 
     spread_i = psi[i] * jnp.exp(z[i])
     eps = r * jr.normal(key_eps)
-    # print("spread :", spread_i)
-    # print("eps: ", eps)
 
     done_buy = eta[i] - spread_i + eps
     done_sell = eta[i] + spread_i + eps
 
-    # print("done buy: ", done_buy)
-
-    # for traded-away events we simulate a quote Z consistent with the event.
-    margin = jnp.abs(r * jr.normal(key_aux))
-
     # observation cases
     case_0 = lambda: done_buy                                                # client buys from dealer D
     case_1 = lambda: done_sell                                               # client sells to dealer D
-    case_2 = lambda: done_buy - margin                                       # client buys from another dealer
-    case_3 = lambda: done_sell + margin                                      # client sells to another dealer
-    case_4 = lambda: eta[i] + eps + jr.uniform(key_aux,
+    case_2 = lambda: eta[i] + eps + jr.uniform(key_aux,
                                                shape=(),
                                                minval=-alpha[i],
                                                maxval= alpha[i])             # D2D trade: observed Y lies inside an interval around u_i + eps
 
-    return jax.lax.switch(event_type, [case_0, case_1, case_2, case_3, case_4])
+    return jax.lax.switch(event_type, [case_0, case_1, case_2])
 
 
 def get_data(
@@ -87,15 +78,6 @@ def get_data(
         dim: int,
         dts: Array,
         params: dict,
-        # m0: Array,
-        # A: Array,
-        # psi: Array,
-        # Q0: Array,
-        # Q: Array,
-        # H0: Array,
-        # H: Array,
-        # R: Array,
-        # alpha: Array,
         sparsity_factor: float = 1.0,
         **kwargs
 ) -> CorporateBondDataset:
@@ -144,7 +126,6 @@ def get_data(
     # precompute cholesky's
     chol_Q0 = jnp.linalg.cholesky(Q0)
     chol_H0 = jnp.linalg.cholesky(H0)
-    chol_Q = jnp.linalg.cholesky(Q)
     chol_H = jnp.linalg.cholesky(H)
     chol_R = jnp.linalg.cholesky(R)
 
@@ -153,7 +134,7 @@ def get_data(
     bond_weights = bond_weights.at[:-1].set(sparsity_factor)
     bond_probs = bond_weights / jnp.sum(bond_weights)
     bond_idxs = jr.categorical(key_bond, jnp.log(bond_probs), shape=(K,)).astype(jnp.int32)
-    event_types = jr.randint(key_type, (K,), minval=0, maxval=5)
+    event_types = jr.randint(key_type, (K,), minval=0, maxval=3)
 
     keys_y = jr.split(key_y, K)
 
@@ -194,46 +175,10 @@ def get_data(
         dts=dts,
         data=obs,
         states=xs,
+        cbbt=xs[1][jnp.arange(xs[1].shape[0]), bond_idxs],     # just use true mid prices as CBBT for now
         params=params,
     )
-    # return xs, obs
-
-
-# def get_prior_params(key, D, T, steps, phi, log_var):
-#     m0_key, H_key = jr.split(key)
-
-#     # log half-spread transition matrix
-#     A = phi * jnp.eye(D)
-
-#     # mid-YtB initial mean, in percentage-point units
-#     scale = 100
-#     M0 = scale * jr.uniform(m0_key, shape=(D,), minval=0.5, maxval=1.0)
-
-#     # covariance parameters
-#     Q0 = 0.01 * jnp.eye(D)                             # initial uncertainty about log half-spreads
-#     Q = 0.01 * jnp.eye(D)                              # daily log half-spread diffusion covariance
-#     H0 = (scale * 0.01)**2 * jnp.eye(D)                # initial uncertainty about the mid-YtB
-#     H = scale**2 * block_sparse_covariance(H_key, D)   # daily mid-YtB diffusion covariance
-#     R = (scale * 0.000025)**2 * jnp.eye(D)             # observation-noise standard deviation approximately 0.2–0.3 bp
-
-#     PSI = scale * 0.007 * jnp.ones(D)                  # baseline half-spread: approximately 0.5–0.8 bp
-#     ALPHA = scale * 0.005 * jnp.ones(D)                # D2D interval half-width; example value of 0.5 bp
-
-#     DTs = jnp.repeat(T / steps, steps)
-
-#     params = {
-#         "A": A,
-#         "m0": M0,
-#         "Q0": Q0,
-#         "H0": H0,
-#         "Q": Q,
-#         "H": H,
-#         "R": R,
-#         "psi": PSI,
-#         "alpha": ALPHA,
-#     }
-
-#     return params, DTs
+        
 
 def get_model_params(key, D, T, steps, phi):
     m0_key, H_key, H0_key = jr.split(key, 3)
@@ -246,18 +191,16 @@ def get_model_params(key, D, T, steps, phi):
     MEAN_M0 = scale * 0.75 * jnp.ones(D)
     COV_M0 = (scale * 0.1)**2 * jnp.eye(D)
     M0 = jr.multivariate_normal(m0_key, MEAN_M0, COV_M0)
-    # M0 = scale * jr.uniform(m0_key, shape=(D,), minval=0.5, maxval=1.0)
 
     # covariance parameters
     Q0 = 0.1 * jnp.eye(D)                              # initial uncertainty about log half-spreads
     Q = 0.1 * jnp.eye(D)                               # daily log half-spread diffusion covariance
+    R = (scale * 0.00025)**2 * jnp.eye(D)              # observation-noise standard deviation approximately 0.2–0.3 bp
 
     H0_SCALE = scale * 0.01 * jnp.ones(D)
     CONCENTRATION = 2 * jnp.ones(D)
     H0 = jax.vmap(lambda _k, _c, _s: inverse_gamma(_k, _c, _s))(jr.split(H0_key, D), CONCENTRATION, H0_SCALE)
-    H0 = jnp.diag(H0)
-    # H0 = (scale * 0.01)**2 * jnp.eye(D)               # initial uncertainty about the mid-YtB
-    R = (scale * 0.00025)**2 * jnp.eye(D)               # observation-noise standard deviation approximately 0.2–0.3 bp
+    H0 = jnp.diag(H0)                                  # initial uncertainty about the mid-YtB
 
     if D == 3:
         # Guéant and Pu: volatilities in bp per sqrt(day)
@@ -288,10 +231,6 @@ def get_model_params(key, D, T, steps, phi):
         "R": R,
         "psi": PSI,
         "alpha": ALPHA,
-        # "mean_m0": MEAN_M0,
-        # "cov_m0": COV_M0,
-        # "scale": H0_SCALE,
-        # "concentration": CONCENTRATION,
     }
 
     return params, DTs

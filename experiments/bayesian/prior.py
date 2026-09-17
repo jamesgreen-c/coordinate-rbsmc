@@ -107,10 +107,8 @@ def log_ht(params, x, data: tuple[Array]):
 
     case_0 = lambda: norm.logpdf(y, loc=eta_i - spread_i, scale=r_i)          # D2C buy: Y = eta_i - psi_i + eps
     case_1 = lambda: norm.logpdf(y, loc=eta_i + spread_i, scale=r_i)          # D2C sell: Y = eta_i + psi_i + eps
-    case_2 = lambda: norm.logcdf((eta_i - spread_i) - y, loc=0.0, scale=r_i)  # traded-away buy RFQ:  observed quote Z, condition eta_i - psi_i + eps >= Z
-    case_3 = lambda: norm.logcdf(y - (eta_i + spread_i), loc=0.0, scale=r_i)  # traded-away sell RFQ: observed quote Z, condition eta_i + psi_i + eps <= Z
 
-    def case_4():
+    def case_2():
         # D2D: observed Y, condition Y in [eta_i - alpha_i + eps, eta_i + alpha_i + eps]
         lo = y - eta_i - alpha_i
         hi = y - eta_i + alpha_i
@@ -122,5 +120,5 @@ def log_ht(params, x, data: tuple[Array]):
         tiny = jnp.log(jnp.finfo(val.dtype).tiny)
         return jnp.maximum(val, tiny)
     
-    return jax.lax.switch(obs_type, [case_0, case_1, case_2, case_3, case_4])
+    return jax.lax.switch(obs_type, [case_0, case_1, case_2])
 
