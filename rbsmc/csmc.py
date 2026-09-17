@@ -1,6 +1,4 @@
-"""
-Implements the cSMC kernel that accepts tuple reference trajectories.
-"""
+"""Generic conditional SMC with ancestral tracing or FFBSi."""
 from typing import Callable, Union, Any
 
 import jax
@@ -8,11 +6,12 @@ from chex import Array, PRNGKey
 from jax import numpy as jnp
 from jax.tree_util import tree_map, tree_leaves
 
+from rbsmc.bayesian.smc import Reference
 from rbsmc.utils.common import barker_move
 from rbsmc.utils.resamplings import normalize
 
 
-def kernel(key: PRNGKey, x_star: Array, b_star: Array, M_0: tuple[Callable, Callable], Gamma_0: Callable,
+def kernel(key: PRNGKey, reference: Reference, M_0: tuple[Callable, Callable], Gamma_0: Callable,
            M_t: Union[tuple[Callable, Callable], tuple[Callable, Callable, Any]],
            Gamma_t: Union[Callable, tuple[Callable, Any]],
            resampling_func: Callable, ancestor_move_func: Callable, N: int, backward: bool = False,
@@ -24,10 +23,8 @@ def kernel(key: PRNGKey, x_star: Array, b_star: Array, M_0: tuple[Callable, Call
     ----------
     key:
         Random number generator key.
-    x_star:
-        Reference trajectory to update.
-    b_star:
-        Indices of the reference trajectory.
+    reference:
+        Full retained trajectory and the slots at which it is embedded.
     M_0:
         Sampler for the initial distribution.
         The first element is the sampling function, taking two arguments (key and number of particle)
@@ -45,7 +42,8 @@ def kernel(key: PRNGKey, x_star: Array, b_star: Array, M_0: tuple[Callable, Call
     ancestor_move_func:
         Function to move the last ancestor indices.
     N:
-        Number of particles to use (N+1, if we include the reference trajectory).
+        Number of free particles. The conditional system contains ``N + 1``
+        particles.
     backward:
         Whether to run the backward sampling kernel.
     conditional:
@@ -54,27 +52,32 @@ def kernel(key: PRNGKey, x_star: Array, b_star: Array, M_0: tuple[Callable, Call
     Returns
     -------
 
-    xs:
-        Particles.
-    bs:
-        Indices of the ancestors.
+    reference:
+        Selected trajectory and its particle slots for the next sweep.
+    log_weights:
+        Normalised filtering log-weights.
     """
-
-    As, Gamma_params, Gamma_t, key_backward, log_ws, xs = forward_pass(key, x_star, b_star, M_0, Gamma_0, M_t, Gamma_t,
-                                                                       resampling_func, N, conditional)
+    As, Gamma_params, Gamma_t, key_backward, log_ws, xs = forward_pass(
+        key, reference, M_0, Gamma_0, M_t, Gamma_t, resampling_func,
+        N, conditional
+    )
+    b_star_T = reference.ancestors[-1]
 
     #################################
     #        Backward pass          #
     #################################
     if backward:
-        xs, Bs = backward_sampling_pass(key_backward, Gamma_t, Gamma_params, b_star[-1], xs, log_ws,
+        trajectory, Bs = backward_sampling_pass(key_backward, Gamma_t, Gamma_params, b_star_T, xs, log_ws,
                                         ancestor_move_func, conditional)
     else:
-        xs, Bs = backward_scanning_pass(key_backward, As, b_star[-1], xs, log_ws[-1], ancestor_move_func)
-    return xs, Bs, log_ws
+        trajectory, Bs = backward_scanning_pass(
+            key_backward, As, b_star_T, xs, log_ws[-1],
+            ancestor_move_func, conditional
+        )
+    return Reference(trajectory, Bs), log_ws
 
 
-def forward_pass(key: PRNGKey, x_star: Array, b_star: Array, M_0: tuple[Callable, Callable], Gamma_0: Callable,
+def forward_pass(key: PRNGKey, reference: Reference, M_0: tuple[Callable, Callable], Gamma_0: Callable,
                  M_t: Union[tuple[Callable, Callable], tuple[Callable, Callable, Any]],
                  Gamma_t: Union[Callable, tuple[Callable, Any]],
                  resampling_func: Callable, N: int, conditional=True):
@@ -85,10 +88,8 @@ def forward_pass(key: PRNGKey, x_star: Array, b_star: Array, M_0: tuple[Callable
         ----------
         key:
             Random number generator key.
-        x_star:
-            Reference trajectory to update.
-        b_star:
-            Indices of the reference trajectory.
+        reference:
+            Full reference trajectory to update.
         M_0:
             Sampler for the initial distribution.
             The first element is the sampling function, taking two arguments (key and number of particle)
@@ -105,7 +106,8 @@ def forward_pass(key: PRNGKey, x_star: Array, b_star: Array, M_0: tuple[Callable
         resampling_func:
             Resampling scheme to use.
         N:
-            Number of particles to use (N+1, if we include the reference trajectory).
+            Number of free particles. The conditional system contains
+            ``N + 1`` particles.
         conditional:
             Whether to do conditional SMC or just SMC.
 
@@ -116,6 +118,8 @@ def forward_pass(key: PRNGKey, x_star: Array, b_star: Array, M_0: tuple[Callable
     ###############################
     #        HOUSEKEEPING         #
     ###############################
+    x_star = reference.trajectory
+    b_star = reference.ancestors
     T = tree_leaves(x_star)[0].shape[0]
 
     key_init, key_loop, key_backward = jax.random.split(key, 3)
@@ -128,7 +132,10 @@ def forward_pass(key: PRNGKey, x_star: Array, b_star: Array, M_0: tuple[Callable
     #################################
     x0 = M_0_rvs(key_init, N + 1)
     if conditional:
-        x0 = tree_map(lambda x0_, xs0_: x0_.at[b_star[0]].set(xs0_), x0, tree_map(lambda x: x[0], x_star))
+        x0 = tree_map(
+            lambda x0_, xs0_: x0_.at[b_star[0]].set(xs0_),
+            x0, tree_map(lambda x: x[0], x_star)
+        )
 
     # Compute initial weights and normalize
     log_w0 = Gamma_0(x0) - M_0_logpdf(x0)
@@ -140,17 +147,23 @@ def forward_pass(key: PRNGKey, x_star: Array, b_star: Array, M_0: tuple[Callable
     #################################
     def body(carry, inp):
         w_t_m_1, x_t_m_1 = carry
-        M_t_params, Gamma_params_t, b_star_t_m_1, b_star_t, key_t, x_star_t = inp
+        M_t_params, Gamma_params_t, key_t, x_star_t, b_star_t_m_1, b_star_t = inp
 
         key_proposal_t, key_resampling_t = jax.random.split(key_t, 2)
         # Conditional resampling
-        A_t = resampling_func(key_resampling_t, w_t_m_1, b_star_t_m_1, b_star_t, conditional)
+        A_t = resampling_func(
+            key_resampling_t, w_t_m_1,
+            b_star_t_m_1, b_star_t, conditional
+        )
         x_t_m_1 = tree_map(lambda x: jnp.take(x, A_t, axis=0), x_t_m_1)
 
         # Sample proposal
         x_t = M_t_rvs(key_proposal_t, x_t_m_1, M_t_params)
         if conditional:
-            x_t = tree_map(lambda xt_, xs_t_: xt_.at[b_star_t].set(xs_t_), x_t, x_star_t)
+            x_t = tree_map(
+                lambda xt_, xs_t_: xt_.at[b_star_t].set(xs_t_),
+                x_t, x_star_t
+            )
 
         log_w_t = Gamma_t(x_t_m_1, x_t, Gamma_params_t) - M_t_logpdf(x_t_m_1, x_t, M_t_params)
         log_w_t = normalize(log_w_t, log_space=True)
@@ -164,7 +177,14 @@ def forward_pass(key: PRNGKey, x_star: Array, b_star: Array, M_0: tuple[Callable
 
     keys_loop = jax.random.split(key_loop, T - 1)
     # Run forward cSMC
-    inputs = prop_params, Gamma_params, b_star[:-1], b_star[1:], keys_loop, tree_map(lambda x: x[1:], x_star)
+    inputs = (
+        prop_params,
+        Gamma_params,
+        keys_loop,
+        tree_map(lambda x: x[1:], x_star),
+        b_star[:-1],
+        b_star[1:],
+    )
     _, (log_ws, As, xs) = jax.lax.scan(body,
                                        (w0, x0),
                                        inputs)
@@ -248,7 +268,10 @@ def backward_sampling_pass(key, Gamma_func, Gamma_params, b_star_T, xs, log_ws, 
     return tree_map(lambda x: x[::-1], xs), Bs[::-1]
 
 
-def backward_scanning_pass(key, As, b_star_T, xs, log_w_T, ancestor_move_func):
+def backward_scanning_pass(
+        key, As, b_star_T, xs, log_w_T, ancestor_move_func,
+        conditional: bool = True,
+    ):
     """
     Backward scanning pass for the cSMC kernel.
 
@@ -279,7 +302,10 @@ def backward_scanning_pass(key, As, b_star_T, xs, log_w_T, ancestor_move_func):
     #        BACKWARD PASS        #
     ###############################
     # Select last ancestor
-    B_T, _ = ancestor_move_func(key, normalize(log_w_T), b_star_T)
+    if conditional:
+        B_T, _ = ancestor_move_func(key, normalize(log_w_T), b_star_T)
+    else:
+        B_T, _ = barker_move(key, normalize(log_w_T), None)
     x_T = tree_map(lambda x: x[-1, B_T], xs)
 
     def body(B_t, inp):

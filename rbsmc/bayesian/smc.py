@@ -1,6 +1,45 @@
 from abc import ABC, abstractmethod
+from typing import Any, NamedTuple
+
 from jax import Array
+from jax import numpy as jnp
 from jax.random import PRNGKey
+from jax.tree_util import tree_leaves, tree_structure
+
+
+class Reference(NamedTuple):
+    """A retained trajectory and its particle positions in the last sweep.
+
+    ``ancestors[t]`` is both the particle selected at time ``t`` and the slot
+    at which ``trajectory[t]`` is embedded during the next conditional sweep.
+    Keeping those positions is what makes ancestor comparison a valid path
+    replacement diagnostic for conditional SMC.
+    """
+
+    trajectory: Any
+    ancestors: Array
+
+    @property
+    def particle_indices(self):
+        """Backward-compatible alias for older analysis code."""
+        return self.ancestors
+
+
+def _trajectory_replaced(old: Any, new: Any):
+    """Compare path values only for genuinely independent SMC sweeps."""
+    if tree_structure(old) != tree_structure(new):
+        raise ValueError("Old and new trajectories must have the same PyTree structure.")
+
+    replaced = None
+    for old_leaf, new_leaf in zip(tree_leaves(old), tree_leaves(new)):
+        changed = jnp.not_equal(old_leaf, new_leaf)
+        if changed.ndim > 1:
+            changed = jnp.any(changed, axis=tuple(range(1, changed.ndim)))
+        replaced = changed if replaced is None else jnp.logical_or(replaced, changed)
+
+    if replaced is None:
+        raise ValueError("A trajectory must contain at least one array leaf.")
+    return replaced
 
 
 class FeynmanKac(ABC):
@@ -8,17 +47,14 @@ class FeynmanKac(ABC):
     def __init__(self):
         pass
 
-    @abstractmethod
     def M0_rvs(self, params, key: PRNGKey, inp: tuple):
-        """ Implement t=0 proposal kernel for SMC """
-        pass
+        """Optional initial proposal hook used by full-state kernels."""
+        raise NotImplementedError
 
-    @abstractmethod
     def Mt_rvs(self, params, key: PRNGKey, xp, inp: tuple):
-        """ Implement Markov proposal kernel for SMC """
-        pass
+        """Optional transition proposal hook used by full-state kernels."""
+        raise NotImplementedError
 
-    @abstractmethod
     def M0_logpdf(self, params, x0, inp: tuple, constant: bool):
         """
         Implement logpdf for t=0 proposal kernel
@@ -28,9 +64,8 @@ class FeynmanKac(ABC):
         inp:       Any external inputs required for logpdf evaluation e.g. ys[0]
         constant:  Whether the calculate the normalising constant for the logpdf
         """
-        pass
+        raise NotImplementedError
 
-    @abstractmethod
     def Mt_logpdf(self, params, xp, x, inp: tuple, constant: bool): 
         """
         Implement logpdf for Markov proposal kernel
@@ -41,15 +76,14 @@ class FeynmanKac(ABC):
         inp:       Any external inputs required for logpdf evaluation e.g. ys[t]
         constant:  Whether the calculate the normalising constant for the logpdf
         """
+        raise NotImplementedError
 
-    @abstractmethod
     def G0_logpdf(self, params, x0, inp: tuple):
-        pass 
+        raise NotImplementedError
 
-    @abstractmethod
     def Gt_logpdf(self, params, x, inp: tuple):
         """ Implement logpdf for potential function """
-        pass
+        raise NotImplementedError
 
     def Gamma_0(self, params, x0, inp, constant: bool):
         return self.G0_logpdf(params, x0, inp) + self.M0_logpdf(params, x0, inp, constant=constant)
@@ -85,7 +119,7 @@ class SMC(ABC):
             self, 
             key: PRNGKey, 
             params: dict,
-            state: tuple[Array],
+            state: Reference,
             data: tuple[Array],
         ):
 
@@ -99,12 +133,15 @@ class SMC(ABC):
         )
 
         # sample new smoothing path
-        xs, Bs, log_ws = kernel(key)
+        reference, log_ws = kernel(key)
 
-        # aux
-        prev_Bs = state[-1]
-        replaced = Bs != prev_Bs
-        return (xs, Bs), {"replaced": replaced, "log_ws": log_ws}
+        if self.conditional:
+            # compare ancestor index
+            replaced = reference.ancestors != state.ancestors
+        else:
+            # labels from independent particle systems are not comparable.
+            replaced = _trajectory_replaced(state.trajectory, reference.trajectory)
+        return reference, {"replaced": replaced, "log_ws": log_ws}
          
 
         

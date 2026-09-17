@@ -15,6 +15,7 @@ from jax.tree_util import tree_map
 from jax.scipy.stats import norm
 from jax.scipy.linalg import solve_triangular
 
+from rbsmc.bayesian.smc import Reference
 from rbsmc.csmc import backward_sampling_pass, backward_scanning_pass
 from rbsmc.utils.resamplings import normalize
 from rbsmc.utils.mvn import mvn_logpdf
@@ -22,8 +23,7 @@ from rbsmc.utils.mvn import mvn_logpdf
 
 def kernel(
         key: PRNGKey,
-        x_star,
-        b_star: Array,
+        reference: Reference,
         M_0: tuple[Callable, Callable],
         Gamma_0: Callable,
         M_t_params,
@@ -44,8 +44,8 @@ def kernel(
     Parameters
     ----------
     key:                 Random number generator key.
-    x_star:              Reference trajectory to update.
-    b_star:              Indices of the reference trajectory.
+    reference:           Full retained trajectory and the slots at which it is
+                         embedded during the conditional sweep.
     M_0:                 Sampler for the initial distribution. 
     Gamma_0:             Initial weight function.
     M_t_params:          Params for the proposal distribution at time t.
@@ -55,15 +55,18 @@ def kernel(
     psi:
     resampling_func:     Resampling scheme to use.
     ancestor_move_func:  Function to move the last ancestor indices.
-    N:                   Number of particles to use (N+1, if we include the reference trajectory).
+    N:                   Number of free particles (the conditional system has N+1 particles).
     backward:            Whether to run the backward sampling kernel.
     conditional:         Whether to do conditional SMC or just SMC.
     """
     ###############################
     #        HOUSEKEEPING         #
     ###############################
+    x_star = reference.trajectory
+    b_star = reference.ancestors
     z_star, eta_star = x_star
     T, D = z_star.shape
+    num_particles = N + 1
 
     keys = jr.split(key, T + 1)
     key_init = keys[0]
@@ -83,16 +86,19 @@ def kernel(
         z_t_m_1, _ = x_t_m_1
 
         # propose only the half-spread state first, as in Guéant Step 1
-        eps_z = jr.normal(key, shape=(N, D))
+        eps_z = jr.normal(key, shape=(num_particles, D))
         z_t = z_t_m_1 @ F_t.T + eps_z @ chol_B_t.T
         return z_t
 
     #################################
     #        Initialisation         #
     #################################
-    x0 = M_0_rvs(key_init, N)
+    x0 = M_0_rvs(key_init, num_particles)
     if conditional:
-        x0 = tree_map(lambda x0_, xs0_: x0_.at[b_star[0]].set(xs0_), x0, tree_map(lambda x: x[0], x_star))
+        x0 = tree_map(
+            lambda x0_, xs0_: x0_.at[b_star[0]].set(xs0_),
+            x0, tree_map(lambda x: x[0], x_star)
+        )
 
     # Compute initial weights and normalize
     log_w0 = Gamma_0(x0) - M_0_logpdf(x0)
@@ -111,7 +117,9 @@ def kernel(
         # Step 1: propose z_t candidates from the exact z transition
         z_t_hat = z_transition_rvs(key_z_t, x_t_m_1, M_t_params)
 
-        # keep z_t from reference trajectory during resample
+        # z_t candidates are indexed by their time-(t-1) parents. Put the
+        # retained candidate at b*_{t-1}; conditional resampling then maps the
+        # retained time-t slot b*_t back to that parent.
         if conditional:
             z_t_hat = z_t_hat.at[b_star_t_m_1].set(x_star_t[0])
 
@@ -123,7 +131,10 @@ def kernel(
         w_aux_t = jnp.exp(log_aux_w_t)
 
         # Step 3: resample ancestors using the predictive weights
-        A_t = resampling_func(key_resampling_t, w_aux_t, b_star_t_m_1, b_star_t, conditional)
+        A_t = resampling_func(
+            key_resampling_t, w_aux_t,
+            b_star_t_m_1, b_star_t, conditional
+        )
         x_t_m_1 = tree_map(lambda x: jnp.take(x, A_t, axis=0), x_t_m_1)
         z_t = jnp.take(z_t_hat, A_t, axis=0)
 
@@ -133,28 +144,44 @@ def kernel(
         x_t = (z_t, eta_t)
 
         if conditional:
-            x_t = tree_map(lambda xt_, xs_t_: xt_.at[b_star_t].set(xs_t_), x_t, x_star_t)
+            x_t = tree_map(
+                lambda xt_, xs_t_: xt_.at[b_star_t].set(xs_t_),
+                x_t, x_star_t
+            )
 
         # Fully adapted after auxiliary resampling: equal filtering weights.
-        log_w_t = -jnp.log(N) * jnp.ones((N,))
+        log_w_t = -jnp.log(num_particles) * jnp.ones((num_particles,))
         # Return next step
         next_carry = log_w_t, x_t
         save = log_w_t, A_t, x_t
 
         return next_carry, save
 
-    inputs = (M_t_params, Gamma_params, tree_map(lambda x: x[1:], x_star), b_star[:-1], b_star[1:], keys_forward)
+    inputs = (
+        M_t_params,
+        Gamma_params,
+        tree_map(lambda x: x[1:], x_star),
+        b_star[:-1],
+        b_star[1:],
+        keys_forward,
+    )
     _, (log_ws, As, xs) = jax.lax.scan(body, (log_w0, x0), inputs)
 
     log_ws = jnp.insert(log_ws, 0, log_w0, axis=0)
     xs = tree_map(lambda xs_, x0_: jnp.insert(xs_, 0, x0_, axis=0), xs, x0)
 
     if backward:
-        xs, Bs = backward_sampling_pass(key_backward, Gamma_t, Gamma_params, b_star[-1], xs, log_ws, ancestor_move_func)
+        trajectory, Bs = backward_sampling_pass(
+            key_backward, Gamma_t, Gamma_params, b_star[-1],
+            xs, log_ws, ancestor_move_func, conditional
+        )
     else:
-        xs, Bs = backward_scanning_pass(key_backward, As, b_star[-1], xs, log_ws[-1], ancestor_move_func)
+        trajectory, Bs = backward_scanning_pass(
+            key_backward, As, b_star[-1], xs, log_ws[-1],
+            ancestor_move_func, conditional
+        )
 
-    return xs, Bs, log_ws
+    return Reference(trajectory, Bs), log_ws
 
 
 def _obs_var(chol_R: Array, bond_idx: Array):
