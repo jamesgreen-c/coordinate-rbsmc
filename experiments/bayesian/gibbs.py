@@ -8,7 +8,7 @@ from jax.scipy.linalg import solve
 
 from rbsmc.utils.horseshoe import Horseshoe
 from rbsmc.bayesian.gibbs import ConjugateBlock, ConditionalBlock, GibbsContext
-from rbsmc.bayesian.dists import GaussianNatParam, InverseGammaNatParam
+from rbsmc.dists import GaussianNatParam, InverseGammaNatParam
 from rbsmc.bayesian.metropolis import RandomWalkMetropolis
 
 ##########################

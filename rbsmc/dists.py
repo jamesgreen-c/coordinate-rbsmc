@@ -13,6 +13,7 @@ from jax.scipy.linalg import solve_triangular
 from rbsmc.utils.mvn import mvn_logpdf
 from rbsmc.utils.inverse_gamma import inverse_gamma, logpdf as ig_logpdf
 
+
 class DistParam(ABC):
     @property
     @abstractmethod

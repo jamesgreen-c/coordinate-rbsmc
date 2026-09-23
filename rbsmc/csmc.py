@@ -6,7 +6,7 @@ from chex import Array, PRNGKey
 from jax import numpy as jnp
 from jax.tree_util import tree_map, tree_leaves
 
-from rbsmc.bayesian.smc import Reference
+from rbsmc.smc import Reference
 from rbsmc.utils.common import barker_move
 from rbsmc.utils.resamplings import normalize
 

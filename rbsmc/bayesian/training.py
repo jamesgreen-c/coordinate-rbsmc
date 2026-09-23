@@ -10,7 +10,7 @@ import jax
 from jax import Array, tree_util
 import jax.random as jr
 
-from rbsmc.bayesian.smc import Reference, SMC
+from rbsmc.smc import Reference, SMC
 from rbsmc.bayesian.gibbs import Gibbs
 
 

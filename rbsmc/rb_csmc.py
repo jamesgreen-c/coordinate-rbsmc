@@ -10,7 +10,7 @@ from chex import Array, PRNGKey
 from jax.scipy.linalg import solve_triangular
 from jax.tree_util import tree_leaves, tree_map, tree_structure, tree_unflatten
 
-from rbsmc.bayesian.smc import Reference
+from rbsmc.smc import Reference
 from rbsmc.utils.common import barker_move
 from rbsmc.utils.resamplings import normalize
 

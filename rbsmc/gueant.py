@@ -15,7 +15,7 @@ from jax.tree_util import tree_map
 from jax.scipy.stats import norm
 from jax.scipy.linalg import solve_triangular
 
-from rbsmc.bayesian.smc import Reference
+from rbsmc.smc import Reference
 from rbsmc.csmc import backward_sampling_pass, backward_scanning_pass
 from rbsmc.utils.resamplings import normalize
 from rbsmc.utils.mvn import mvn_logpdf

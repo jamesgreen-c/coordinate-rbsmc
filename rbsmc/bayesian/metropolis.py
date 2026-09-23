@@ -12,7 +12,7 @@ from jax import Array
 from jax.random import PRNGKey
 from jax.scipy.linalg import solve
 
-from rbsmc.bayesian.dists import NatParam, GaussianNatParam
+from rbsmc.dists import NatParam, GaussianNatParam
 from rbsmc.bayesian.gibbs import GibbsBlock, GibbsContext
 
 

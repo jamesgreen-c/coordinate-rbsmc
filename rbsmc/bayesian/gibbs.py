@@ -14,7 +14,7 @@ import jax.random as jr
 from jax import Array
 from jax.random import PRNGKey
 
-from rbsmc.bayesian.dists import NatParam
+from rbsmc.dists import NatParam
 
 
 @dataclass(frozen=True)

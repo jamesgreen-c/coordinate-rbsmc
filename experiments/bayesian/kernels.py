@@ -11,7 +11,7 @@ import rbsmc.csmc as csmc
 import rbsmc.rb_csmc as rb_csmc
 import rbsmc.gueant as gueant
 
-from rbsmc.bayesian.smc import FeynmanKac, Reference
+from rbsmc.smc import FeynmanKac, Reference
 
 from experiments.bayesian.prior import log_p0, log_pt, log_ht, ou_diag_transition
 

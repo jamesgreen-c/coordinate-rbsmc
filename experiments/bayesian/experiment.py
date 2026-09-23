@@ -13,7 +13,7 @@ from jax.random import PRNGKey
 
 from rbsmc.utils.common import force_move
 from rbsmc.utils.resamplings import killing
-from rbsmc.bayesian.smc import SMC
+from rbsmc.smc import SMC
 from rbsmc.bayesian.training import ParticleGibbs, Config
 from rbsmc.bayesian.gibbs import Gibbs
 
