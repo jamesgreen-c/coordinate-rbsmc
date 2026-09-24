@@ -9,17 +9,16 @@ import jax.random as jr
 from jax.random import PRNGKey
 from jax.tree_util import tree_map
 
-from rbsmc.expmax.training import Config
+from rbsmc.expmax.prior import Prior
 from rbsmc.smc import SMC, Reference
 
 
-
 class FreeEnergy:
-    def __init__(self, prior, smc: SMC):
+    def __init__(self, prior: Prior, smc: SMC):
         self.prior = prior
         self.smc = smc
 
-    def configure(self, config: Config):
+    def configure(self, config):
         """ For easier use in train_continue() """
         self.num_samples = config.num_samples
 
@@ -27,17 +26,19 @@ class FreeEnergy:
             self,
             key: Array,
             data: tuple[Array],
-            config: Config
+            config,
+            hyperparams: dict,
         ) -> tuple[dict, dict[optax.OptState], dict[optax.GradientTransformation]]:
         self.configure(config)
         key_params, key_state = jr.split(key)
 
-        params = self.prior.init(key_params, data, config)
+        opt_params = self.prior.init(key_params, hyperparams, data, config)
         opts = config.prior.build()
-        opt_states = opts.init(params)
+        opt_states = opts.init(opt_params)
 
-        state = self.smc.init(key_state, params, data)
-        return params, opt_states, opts, state
+        _params = {**self.prior.params, **opt_params}
+        state = self.smc.init(key_state, _params, data)
+        return opt_params, opt_states, opts, state
 
     def loss(self, key: PRNGKey, params: dict, state, data: tuple[Array], dts: Array) -> tuple[float, Any]:
 
@@ -62,10 +63,10 @@ class FreeEnergy:
     def get_posterior(self, key: PRNGKey, params: dict, state: Reference, data):
         keys = jr.split(key, self.num_samples)
         samples, _ = vmap(lambda _k: self.smc.sample(_k, params, state, data))(keys)
-        return samples.trajectory, samples.ancestors
+        return samples
 
     def get_loss(self, params, samples, data, dts):
-        trajectories = samples.trajectories
+        trajectories = samples.trajectory
         energies = prior_logpdf(self.prior, params, trajectories, data, dts)
         loss = -energies.mean() - self.prior.theta_logpdf(params) # TODO
         return loss

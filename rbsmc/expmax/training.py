@@ -58,8 +58,8 @@ class OptimConfig:
 class Config:
     """Monte Carlo EM training configuration."""
 
-    samples: int = 1000
-    burnin: int = 1000
+    num_iter: int = 1000
+    num_samples: int = 1
     seed: int = 0
 
     prior: OptimConfig = field(default_factory=lambda: OptimConfig(
@@ -81,11 +81,11 @@ class Config:
         if self.saved_paths is not None and (isinstance(self.saved_paths, bool) or self.saved_paths < 1):
             raise ValueError("saved_paths must be None or a positive integer.")
 
-        if self.samples < 0:
-            raise ValueError("samples must be non-negative.")
+        if self.num_iter < 0:
+            raise ValueError("num_iter must be non-negative.")
 
-        if self.burnin < 0:
-            raise ValueError("burnin must be non-negative.")
+        if self.num_samples < 1:
+                    raise ValueError("num_iter must be positive.")
 
         if self.replacement_rate_window < 1:
             raise ValueError("replacement_rate_window must be a positive integer.")
@@ -136,7 +136,7 @@ class MonteCarloEM:
         new_params = optax.apply_updates(params, updates)
         return -loss, new_params, new_opt_states, aux
 
-    def run(self, data, dts: Array):
+    def run(self, data, dts: Array, hyperparams: dict):
         """
         Runs Monte Carlo Expectation Maximisation.
 
@@ -150,20 +150,24 @@ class MonteCarloEM:
         """
         data_leaf = tree_util.tree_leaves(data)[0]
         T = data_leaf.shape[0]
-        total = self.config.burnin + self.config.samples
 
         train_step = self.train_step if self.config.debug else jax.jit(self.train_step)
 
         # initialisation
         key, init_key = jr.split(jr.PRNGKey(self.config.seed))
-        self.params, self.opt_states, self.opts, state = self.model.init(init_key, data, self.config)
+        self.params, self.opt_states, self.opts, state = self.model.init(
+            init_key, 
+            data, 
+            self.config, 
+            hyperparams
+        )
 
         # initialise stores
-        self.energies = np.empty(total, dtype=np.float32)
+        self.energies = np.empty(self.config.num_iter, dtype=np.float32)
         self._allocate_hist(state, self.params, T)
 
         # run
-        pbar = tqdm(range(total))
+        pbar = tqdm(range(self.config.num_iter))
         for itr in pbar:
             key, subkey = jr.split(key)
 
@@ -173,7 +177,7 @@ class MonteCarloEM:
             # track energy
             energy_float = float(energy)
             self.energies[itr] = energy_float
-            pbar.set_postfix(loss=f"{energy_float:.3f}")
+            pbar.set_postfix(energy=f"{energy_float:.3f}")
             
             # calculate replacement rate
             replacement_rates = self._calculate_replacement_rate(aux["replaced"])
@@ -188,7 +192,7 @@ class MonteCarloEM:
         return self.reference_hist, self.param_hist, self.replacement_rates
 
     def _allocate_hist(self, state, params, T):
-        total = self.config.burnin + self.config.samples
+        total = self.config.num_iter
         num_stored = 0 if total == 0 else (total - 1) // self.thin + 1
 
         self.param_hist = tree_util.tree_map(
