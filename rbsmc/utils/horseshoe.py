@@ -11,6 +11,34 @@ from rbsmc.utils.inverse_gamma import inverse_gamma
 class Horseshoe:
 
     @staticmethod
+    def logpdf(H: Array, llambda: Array, tau: Array) -> Array:
+        """Log prior density of (H, lambda², tau), up to the flat diagonal constant."""
+        D = H.shape[-1]
+        rows, cols = jnp.triu_indices(D, k=1)
+
+        beta = jnp.linalg.inv(H)
+        omega = beta[rows, cols]
+        lambda_sq = llambda[rows, cols]
+        variance = lambda_sq * tau**2
+
+        normal = -0.5 * jnp.sum(jnp.log(2 * jnp.pi * variance) + omega**2 / variance)
+
+        # p(lambda^2) = 1 / (pi * sqrt(lambda^2) * (1 + lambda^2)).
+        local = jnp.sum(-jnp.log(jnp.pi) - 0.5 * jnp.log(lambda_sq) - jnp.log1p(lambda_sq))
+        global_ = jnp.log(2 / jnp.pi) - jnp.log1p(tau**2)
+
+        sign, logdet_H = jnp.linalg.slogdet(H)
+        inverse_jacobian = -(D + 1) * logdet_H
+
+        valid = (
+            (sign > 0)
+            & jnp.all(jnp.linalg.eigvalsh(H) > 0)
+            & jnp.all(lambda_sq > 0)
+            & (tau > 0)
+        )
+        return jnp.where(valid, normal + local + global_ + inverse_jacobian, -jnp.inf)
+
+    @staticmethod
     def _other_indices(d: int, D: int) -> Array:
         return jnp.concatenate((jnp.arange(d), jnp.arange(d + 1, D)))
 
