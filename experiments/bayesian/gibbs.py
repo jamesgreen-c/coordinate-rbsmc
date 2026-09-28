@@ -28,7 +28,7 @@ def make_blocks(D: int, full_inference: bool = False):
     H0_block = _construct_H0_block(D)
     R_block = _construct_R_block(D)
 
-    blocks = [H_block] # , m0_block, H0_xi_block, H0_block, R_block]
+    blocks = [H_block, m0_block, H0_xi_block, H0_block, R_block]
     # blocks = [] 
 
     if full_inference:
@@ -39,7 +39,6 @@ def make_blocks(D: int, full_inference: bool = False):
         PSI_block = None
         ALPHA_block = None
         blocks.extend([A_block, Q_block, Q0_block, PSI_block, ALPHA_block])
-        pass 
     
     return blocks
 
