@@ -37,11 +37,7 @@ BACKWARD_MODES = {
 
 def retention_config(D: int) -> tuple[int, int | None]:
     """Return memory-safe history settings for a given state dimension."""
-    if D >= 100:
-        return 10, 20
-    if D >= 50:
-        return 5, 20
-    return 1, None
+    return 10, 20
 
 
 def results_exist(*, D, T, steps, args, kernel, thin, saved_paths) -> bool:
@@ -49,18 +45,31 @@ def results_exist(*, D, T, steps, args, kernel, thin, saved_paths) -> bool:
     if kernel not in KERNEL_NAMES:
         raise ValueError("Invalid kernel int provided: must be in [0, 1, 2]")
 
-    experiment_name = "kernel={},D={},T={},steps={},phi={},N={},samples={},burnin={},full-inference={},conditional={},seed={},backward-mode={}"
+    # experiment_name = "kernel={},D={},T={},steps={},phi={},N={},samples={},burnin={},full-inference={},conditional={},seed={},backward-mode={}"
+    # experiment_name = experiment_name.format(
+    #     KERNEL_NAMES[kernel],
+    #     D,
+    #     T,
+    #     steps,
+    #     args.phi,
+    #     args.N,
+    #     args.samples,
+    #     args.burnin,
+    #     args.full_inference,
+    #     True,
+    #     args.seed,
+    #     BACKWARD_MODES[kernel],
+    # )
+
+    experiment_name = "kernel={},D={},T={},steps={},N={},samples={},burnin={},seed={},backward={}"
     experiment_name = experiment_name.format(
         KERNEL_NAMES[kernel],
         D,
         T,
         steps,
-        args.phi,
         args.N,
         args.samples,
         args.burnin,
-        args.full_inference,
-        True,
         args.seed,
         BACKWARD_MODES[kernel],
     )
@@ -69,11 +78,11 @@ def results_exist(*, D, T, steps, args, kernel, thin, saved_paths) -> bool:
     return os.path.exists(datapath)
 
 
-DS = (3, 10, 15, 20, 50, 100)
-TS = (500, 1000, 1500, 2000, 2500, 3000)
+DS = (3, 10, 15, 20, 50)
+TS = (500, 1000, 2000, 3000, 4000)
 KERNELS = (0, 1, 2)
 
-combination = [(D, T, kernel) for D, T, kernel in product(DS, TS, KERNELS) if D < 15 or T >= 1500][::-1]
+combination = [(D, T, kernel) for D, T, kernel in product(DS, TS, KERNELS) if D < 15 or T >= 2000][::-1]
 print(f"Number of experiments: {len(combination)}")
 
 if args.i != -1 and not (0 <= args.i < len(combination)):

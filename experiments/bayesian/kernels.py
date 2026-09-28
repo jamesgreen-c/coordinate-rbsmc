@@ -85,7 +85,7 @@ class CSMC(FeynmanKac):
         """
         H = params["H"]
         chol_H = jnp.linalg.cholesky(H)
-        
+
         F_t, chol_Q_t, dt, _ = inp
         z_t_m_1, eta_t_m_1 = x_t_m_1
 
@@ -401,13 +401,13 @@ class GueantCSMC(FeynmanKac):
         ):
         A = params["A"]
         Q = params["Q"]
-        H = params["H"]
         R = params["R"]
+        H = params["H"]
         alpha = params["alpha"]
         psi = params["psi"]
 
-        chol_H = jnp.linalg.cholesky(H)
         chol_R = jnp.linalg.cholesky(R)
+        chol_H = jnp.linalg.cholesky(H)
         Fs, chol_Qs = vmap(lambda dt: ou_diag_transition(A, Q, dt))(self.dts)
 
         inp_0 = tree_map(lambda x: x[0], data),

@@ -155,18 +155,15 @@ if __name__ == "__main__":
     if not os.path.exists("results"):
         os.mkdir("results")
 
-    experiment_name = "kernel={},D={},T={},steps={},phi={},N={},samples={},burnin={},full-inference={},conditional={},seed={},backward-mode={}"
+    experiment_name = "kernel={},D={},T={},steps={},N={},samples={},burnin={},seed={},backward={}"
     experiment_name = experiment_name.format(
         kernel.name,
         args.D,
         args.T,
         args.steps,
-        args.phi,
         args.N,
         args.samples,
         args.burnin,
-        args.full_inference,
-        args.conditional,
         args.seed,
         BACKWARD_MODE,
     )
