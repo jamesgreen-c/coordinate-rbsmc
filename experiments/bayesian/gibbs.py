@@ -11,19 +11,24 @@ from rbsmc.bayesian.gibbs import ConjugateBlock, ConditionalBlock, GibbsContext
 from rbsmc.dists import GaussianNatParam, InverseGammaNatParam
 from rbsmc.bayesian.metropolis import RandomWalkMetropolis
 
+from experiments.bayesian.dataset import CorporateBondDataset
+
 ##########################
 #     horseshoe prior    #
 ##########################
-def make_blocks(D: int, full_inference: bool = False):
+
+def make_blocks(dataset: CorporateBondDataset, full_inference: bool = False):
     """
     
     Parameters
     ----------
     D: latent state dimension (number of bonds)
     """
+    D = dataset.D
+    assert dataset.standardised, "Must pass standardised dataset to male_blocks"
 
     H_block = _construct_H_block(D)
-    m0_block = _construct_m0_block(D)
+    m0_block = _construct_m0_block(D, dataset)
     H0_xi_block = _construct_auxiliary_H0_block(D)
     H0_block = _construct_H0_block(D)
     R_block = _construct_R_block(D)
@@ -43,10 +48,13 @@ def make_blocks(D: int, full_inference: bool = False):
     return blocks
 
 
-def _construct_m0_block(D, mean=0.5, variance=1.0):
+def _construct_m0_block(D, dataset: CorporateBondDataset, variance=1.0):
+    
+    obs_values, bond_idxs, _ = dataset.data  # already standardised
+    mean = jnp.asarray([jnp.mean(obs_values[jnp.flatnonzero(bond_idxs == d)[:3]]) for d in range(D)])
 
     # prior specification
-    mean = jnp.broadcast_to(jnp.asarray(mean), (D,))
+    # mean = jnp.broadcast_to(jnp.asarray(mean), (D,))
     covariance = variance * jnp.eye(D)
     precision = solve(covariance, jnp.eye(D))
     _prior = GaussianNatParam(precision=precision, precision_mean=precision @ mean)

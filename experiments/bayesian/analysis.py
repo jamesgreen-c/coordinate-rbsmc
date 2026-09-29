@@ -184,18 +184,31 @@ def plot_covariance_diagnostics(name, history, truth, posterior_selector, plotpa
         fig.savefig(f"{plotpath}/{label}_{name}_heatmaps.png", dpi=200, bbox_inches="tight")
         plt.close(fig)
 
-experiment_name = "kernel={},D={},T={},steps={},phi={},N={},samples={},burnin={},full-inference={},conditional={},seed={},backward-mode={}"
+# experiment_name = "kernel={},D={},T={},steps={},phi={},N={},samples={},burnin={},full-inference={},conditional={},seed={},backward-mode={}"
+# experiment_name = experiment_name.format(
+#     args.kernel,
+#     args.D,
+#     args.T,
+#     args.steps,
+#     args.phi,
+#     args.N,
+#     args.samples,
+#     args.burnin,
+#     args.full_inference,
+#     args.conditional,
+#     args.seed,
+#     backward_mode,
+# )
+
+experiment_name = "kernel={},D={},T={},steps={},N={},samples={},burnin={},seed={},backward={}"
 experiment_name = experiment_name.format(
     args.kernel,
     args.D,
     args.T,
     args.steps,
-    args.phi,
     args.N,
     args.samples,
     args.burnin,
-    args.full_inference,
-    args.conditional,
     args.seed,
     backward_mode,
 )

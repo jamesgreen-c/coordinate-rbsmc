@@ -87,9 +87,6 @@ KERNEL = SMC(
     kwargs=kwargs
 )
 
-# GIBBS CONFIG
-BLOCKS = make_blocks(D=args.D, full_inference=args.full_inference)
-GIBBS = Gibbs(blocks=BLOCKS)
 
 # INFERENCE CONFIG
 CONFIG = Config(
@@ -99,7 +96,6 @@ CONFIG = Config(
     thin=args.thin,
     saved_paths=args.saved_paths,
 )
-SAMPLER = ParticleGibbs(smc=KERNEL, gibbs=GIBBS, config=CONFIG)
 
 print(f"""
 ========================
@@ -121,12 +117,18 @@ def one_experiment(key: PRNGKey):
     # generate data
     key, data_key = jr.split(key)
     dataset = get_data(key=data_key, dim=args.D, dts=DTs, params=MODEL_PARAMS)
+
     estimated_params = {}
     if not args.full_inference:
         estimated_params = estimate_params_from_data(dataset=dataset)
 
     dataset.params = {**dataset.params, **estimated_params}
     scaled_dataset = dataset.standardised_data
+
+    # gibbs config
+    BLOCKS = make_blocks(dataset=scaled_dataset, full_inference=args.full_inference)
+    GIBBS = Gibbs(blocks=BLOCKS)
+    SAMPLER = ParticleGibbs(smc=KERNEL, gibbs=GIBBS, config=CONFIG)
 
     # run particle Gibbs. Passing prior params uses true params only for those without Gibbs blocks
     references, params, replacement_rates = SAMPLER.run(
