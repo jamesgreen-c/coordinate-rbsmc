@@ -48,13 +48,13 @@ def make_blocks(dataset: CorporateBondDataset, full_inference: bool = False):
     return blocks
 
 
-def _construct_m0_block(D, dataset: CorporateBondDataset, variance=1.0):
+def _construct_m0_block(D, dataset: CorporateBondDataset, mean = 0.75, variance=1.0):
     
-    obs_values, bond_idxs, _ = dataset.data  # already standardised
-    mean = jnp.asarray([jnp.mean(obs_values[jnp.flatnonzero(bond_idxs == d)[:3]]) for d in range(D)])
+    # obs_values, bond_idxs, _ = dataset.data  # already standardised
+    # mean = jnp.asarray([jnp.mean(obs_values[jnp.flatnonzero(bond_idxs == d)[:3]]) for d in range(D)])
 
     # prior specification
-    # mean = jnp.broadcast_to(jnp.asarray(mean), (D,))
+    mean = jnp.broadcast_to(jnp.asarray(mean), (D,))
     covariance = variance * jnp.eye(D)
     precision = solve(covariance, jnp.eye(D))
     _prior = GaussianNatParam(precision=precision, precision_mean=precision @ mean)
@@ -80,7 +80,7 @@ def _construct_m0_block(D, dataset: CorporateBondDataset, variance=1.0):
     )
 
 
-def _construct_auxiliary_H0_block(D, scale=1.0):
+def _construct_auxiliary_H0_block(D, scale=0.5):
 
     alpha=jnp.full((D,), 0.5)
     beta=jnp.full((D,), 1 / scale**2)
