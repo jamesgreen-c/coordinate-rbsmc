@@ -115,8 +115,8 @@ class CorporateBondDataset(Dataset):
         std_obs_values = (obs_values - means[bond_idxs]) / stds[bond_idxs]
         std_cbbt = (self.CBBT - means[bond_idxs]) / stds[bond_idxs]
 
-        eta, z = self.states
-        std_states = ((eta - means) / stds, z)
+        z, eta = self.states
+        std_states = (z, (eta - means) / stds, )
 
         std_params = {
             **self.params,

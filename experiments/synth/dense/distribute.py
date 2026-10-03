@@ -1,11 +1,12 @@
-# ARGS PARSING
 import argparse
-import os
 import shlex
 import subprocess
-
+import sys
+from pathlib import Path
 from itertools import product
+
 from rbsmc.utils.printing import ctext
+
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--i", dest="i", type=int, default=-1)
@@ -15,7 +16,7 @@ parser.add_argument("--M", dest="M", type=int, default=1)
 parser.add_argument("--burnin", dest="burnin", type=int, default=1000)
 parser.add_argument("--samples", dest="samples", type=int, default=500)
 parser.add_argument("--phi", dest="phi", type=float, default=0.1)
-
+parser.add_argument("--analysis", action="store_true")
 parser.add_argument("--full-inference", action="store_true")
 parser.add_argument("--no-full-inference", dest="full_inference", action="store_false")
 parser.set_defaults(full_inference=False)
@@ -34,32 +35,18 @@ BACKWARD_MODES = {
     2: "ffbsi",
 }
 
+ROOT = Path(__file__).resolve().parent
+SHARED_ROOT = Path(__file__).resolve().parents[1]
+
 
 def retention_config(D: int) -> tuple[int, int | None]:
     """Return memory-safe history settings for a given state dimension."""
-    return 10, 20
-
+    return 20, 20
 
 def results_exist(*, D, T, steps, args, kernel, thin, saved_paths) -> bool:
-    """Mirror experiment.py's experiment_name + datapath convention and check if results already exist."""
+    """Check the result path used by the shared experiment script."""
     if kernel not in KERNEL_NAMES:
         raise ValueError("Invalid kernel int provided: must be in [0, 1, 2]")
-
-    # experiment_name = "kernel={},D={},T={},steps={},phi={},N={},samples={},burnin={},full-inference={},conditional={},seed={},backward-mode={}"
-    # experiment_name = experiment_name.format(
-    #     KERNEL_NAMES[kernel],
-    #     D,
-    #     T,
-    #     steps,
-    #     args.phi,
-    #     args.N,
-    #     args.samples,
-    #     args.burnin,
-    #     args.full_inference,
-    #     True,
-    #     args.seed,
-    #     BACKWARD_MODES[kernel],
-    # )
 
     experiment_name = "kernel={},D={},T={},steps={},N={},samples={},burnin={},seed={},backward={}"
     experiment_name = experiment_name.format(
@@ -74,13 +61,18 @@ def results_exist(*, D, T, steps, args, kernel, thin, saved_paths) -> bool:
         BACKWARD_MODES[kernel],
     )
 
-    datapath = os.path.join("results", experiment_name, "data.npz")
-    return os.path.exists(datapath)
+    datapath = ROOT / "results" / experiment_name / "data.npz"
+    return datapath.is_file()
+
+def run_command(command):
+    printable_command = " ".join(shlex.quote(part) for part in command)
+    print("\nExecuting:", ctext(printable_command, "green"))
+    subprocess.run(command, check=True)
 
 
-DS = (3, 10, 15, 20, 50)
-TS = (500, 1000, 2000, 3000, 4000)
-KERNELS = (0, 1, 2)
+DS = (3,) # , 10, 15, 20, 50)
+TS = (100,)
+KERNELS = (0,) # , 1, 2)
 
 combination = [(D, T, kernel) for D, T, kernel in product(DS, TS, KERNELS) if D < 15 or T >= 2000][::-1]
 print(f"Number of experiments: {len(combination)}")
@@ -92,42 +84,50 @@ indices = range(len(combination)) if args.i == -1 else [args.i]
 
 for j in indices:
     D, T, kernel = combination[j]
-    steps = T - 1
+    steps = (T - 1) # * D * 5  # roughly 5 observations per bond per day
     thin, saved_paths = retention_config(D)
 
-    if results_exist(
-        D=D,
-        T=T,
-        steps=steps,
-        args=args,
-        kernel=kernel,
-        thin=thin,
-        saved_paths=saved_paths,
-    ):
-        print(ctext(f"Skipping (already run): kernel={KERNEL_NAMES[kernel]}, backward-mode={BACKWARD_MODES[kernel]}, D={D}, T={T}, steps={steps}, N={args.N}, samples={args.samples}, burnin={args.burnin}, full-inference={args.full_inference}", "yellow"))
-        continue
-
     inference_flag = "--full-inference" if args.full_inference else "--no-full-inference"
-    command = [
-        "python3",
-        "experiment.py",
-        "--kernel", str(kernel),
+    common_args = [
         "--D", str(D),
         "--T", str(T),
         "--steps", str(steps),
         "--N", str(args.N),
-        "--M", str(args.M),
         "--samples", str(args.samples),
         "--burnin", str(args.burnin),
         "--phi", str(args.phi),
         "--seed", str(args.seed),
         "--backward-mode", BACKWARD_MODES[kernel],
         "--thin", str(thin),
+        "--root", str(ROOT),
         inference_flag,
     ]
     if saved_paths is not None:
-        command.extend(("--saved-paths", str(saved_paths)))
+        common_args.extend(("--saved-paths", str(saved_paths)))
 
-    printable_command = " ".join(shlex.quote(part) for part in command)
-    print("\nExecuting:", ctext(printable_command, "green"))
-    # subprocess.run(command, check=True)
+    if results_exist(D=D, T=T, steps=steps, args=args, kernel=kernel, thin=thin, saved_paths=saved_paths):
+        print(ctext(
+            f"Skipping (already run): kernel={KERNEL_NAMES[kernel]}, "
+            f"backward-mode={BACKWARD_MODES[kernel]}, D={D}, T={T}, "
+            f"steps={steps}, N={args.N}, samples={args.samples}, "
+            f"burnin={args.burnin}, full-inference={args.full_inference}",
+            "yellow",
+        ))
+    else:
+        command = [
+            sys.executable,
+            str(SHARED_ROOT / "experiment.py"),
+            "--kernel", str(kernel),
+            "--M", str(args.M),
+            *common_args,
+        ]
+        run_command(command)
+
+    if args.analysis:
+        command = [
+            sys.executable,
+            str(SHARED_ROOT / "analysis.py"),
+            "--kernel", KERNEL_NAMES[kernel],
+            *common_args,
+        ]
+        run_command(command)

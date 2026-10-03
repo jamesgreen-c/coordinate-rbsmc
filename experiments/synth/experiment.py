@@ -1,9 +1,9 @@
 import argparse
 import os
 from dataclasses import asdict
+from pathlib import Path
 
 import numpy as np
-
 import jax.random as jr
 
 import jax
@@ -17,10 +17,10 @@ from rbsmc.smc import SMC
 from rbsmc.bayesian.training import ParticleGibbs, Config
 from rbsmc.bayesian.gibbs import Gibbs
 
-from experiments.bayesian.data import get_data, get_model_params
-from experiments.bayesian.kernels import KernelType
-from experiments.bayesian.gibbs import make_blocks
-from experiments.bayesian.dataset import estimate_params_from_data
+from experiments.synth.data import get_data, get_model_params
+from experiments.kernels import KernelType
+from experiments.gibbs import make_blocks
+from experiments.dataset import estimate_params_from_data
 
 
 parser = argparse.ArgumentParser()
@@ -55,7 +55,12 @@ parser.add_argument("--debug", action='store_true')
 parser.add_argument('--no-debug', dest='debug', action='store_false')
 parser.set_defaults(debug=False)
 
+parser.add_argument("--root", type=Path, default=Path.cwd())
+
 args = parser.parse_args()
+
+# RESULTS DIR
+RESULTS_ROOT = args.root.expanduser().resolve() / "results"
 
 # RNG
 KEY = PRNGKey(0)  # same every time
@@ -154,8 +159,7 @@ if __name__ == "__main__":
     references, params, replacement_rates, energies, dataset, scaled_dataset, estimated_params = one_experiment(EXPERIMENT_KEY)
 
     # save results
-    if not os.path.exists("results"):
-        os.mkdir("results")
+    RESULTS_ROOT.mkdir(parents=True, exist_ok=True)
 
     experiment_name = "kernel={},D={},T={},steps={},N={},samples={},burnin={},seed={},backward={}"
     experiment_name = experiment_name.format(
@@ -170,13 +174,12 @@ if __name__ == "__main__":
         BACKWARD_MODE,
     )
 
-    dirpath = f"results/{experiment_name}"
-    if not os.path.exists(dirpath):
-        os.mkdir(dirpath)
+    DIRPATH = RESULTS_ROOT / experiment_name
+    DIRPATH.mkdir(parents=True, exist_ok=True)
+    DATAPATH = DIRPATH / "data.npz"
 
-    datapath = f"{dirpath}/data.npz"
     np.savez_compressed(
-        datapath,
+        DATAPATH,
         references=_pack_object(_serialise_reference(references)),
         params=params,
         energies=energies,

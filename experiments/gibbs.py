@@ -8,27 +8,33 @@ from jax.scipy.linalg import solve
 
 from rbsmc.utils.horseshoe import Horseshoe
 from rbsmc.bayesian.gibbs import ConjugateBlock, ConditionalBlock, GibbsContext
-from rbsmc.bayesian.dists import GaussianNatParam, InverseGammaNatParam
+from rbsmc.dists import GaussianNatParam, InverseGammaNatParam
 from rbsmc.bayesian.metropolis import RandomWalkMetropolis
+
+from experiments.dataset import CorporateBondDataset
 
 ##########################
 #     horseshoe prior    #
 ##########################
-def make_blocks(D: int, full_inference: bool = False):
+
+def make_blocks(dataset: CorporateBondDataset, full_inference: bool = False):
     """
     
     Parameters
     ----------
     D: latent state dimension (number of bonds)
     """
+    D = dataset.D
+    assert dataset.standardised, "Must pass standardised dataset to male_blocks"
 
     H_block = _construct_H_block(D)
-    m0_block = _construct_m0_block(D)
-    H0_xi_block = _construct_auxiliary_H0_block(D)
+    m0_block = _construct_m0_block(D, dataset)
+    # H0_xi_block = _construct_auxiliary_H0_block(D)
     H0_block = _construct_H0_block(D)
     R_block = _construct_R_block(D)
 
-    blocks = [H_block, m0_block, H0_xi_block, H0_block, R_block]
+    blocks = [H_block, m0_block, H0_block, R_block]
+    # blocks = [] 
 
     if full_inference:
         # TODO: add optionality for inference on PSI, ALPHA, Q, Q0, R as well
@@ -38,12 +44,14 @@ def make_blocks(D: int, full_inference: bool = False):
         PSI_block = None
         ALPHA_block = None
         blocks.extend([A_block, Q_block, Q0_block, PSI_block, ALPHA_block])
-        pass 
     
     return blocks
 
 
-def _construct_m0_block(D, mean=0.5, variance=1.0):
+def _construct_m0_block(D, dataset: CorporateBondDataset, mean = 0.75, variance=1.0):
+    
+    # obs_values, bond_idxs, _ = dataset.data  # already standardised
+    # mean = jnp.asarray([jnp.mean(obs_values[jnp.flatnonzero(bond_idxs == d)[:3]]) for d in range(D)])
 
     # prior specification
     mean = jnp.broadcast_to(jnp.asarray(mean), (D,))
@@ -72,55 +80,76 @@ def _construct_m0_block(D, mean=0.5, variance=1.0):
     )
 
 
-def _construct_auxiliary_H0_block(D, scale=1.0):
+# def _construct_auxiliary_H0_block(D, scale=0.5):
 
-    alpha=jnp.full((D,), 0.5)
-    beta=jnp.full((D,), 1 / scale**2)
-    _prior = InverseGammaNatParam(alpha_plus_one=alpha + 1, beta=beta)
+#     alpha=jnp.full((D,), 0.5)
+#     beta=jnp.full((D,), 1 / scale**2)
+#     _prior = InverseGammaNatParam(alpha_plus_one=alpha + 1, beta=beta)
+
+#     def _likelihood(context: GibbsContext):
+#         """
+#         Construct p(H0 | xi) as an inverse-Gamma function of xi.
+#         """
+#         H0_diag = jnp.diag(context.params["H0"])
+#         alpha = jnp.full((D,), -0.5)
+#         return InverseGammaNatParam(alpha_plus_one=alpha + 1, beta=1 / H0_diag)
+
+#     def _unpack(sample: Array):
+#         return {"H0_xi": sample}
+
+#     return ConjugateBlock(
+#         name="H0_xi",
+#         prior=_prior,
+#         likelihood=_likelihood,
+#         unpack=_unpack,
+#     )
+
+
+# def _construct_H0_block(D):
+
+#     def _prior(params: dict):
+#         """
+#         H0_d | xi_d ~ InvGamma(1 / 2, 1 / xi_d).
+#         """
+#         xi = params["H0_xi"]
+#         alpha = jnp.full((D,), 0.5)
+#         return InverseGammaNatParam(alpha_plus_one=alpha + 1, beta=1 / xi)
+
+#     def _likelihood(context: GibbsContext):
+#         """
+#         Construct p(eta_1 | m_0, H_0) as an inverse-Gamma function of the diagonal entries of H_0.
+#         """
+#         m0 = context.params["m0"]
+#         eta1 = context.trajectory[1][0]
+#         return InverseGammaNatParam.from_gaussian(value=eta1, mean=m0)
+
+#     def _unpack(sample: Array):
+#         return {"H0": jnp.diag(sample)}
+
+#     return ConjugateBlock(
+#         name="H0",
+#         prior=_prior,
+#         likelihood=_likelihood,
+#         unpack=_unpack,
+#     )
+
+def _construct_H0_block(D, concentration: float = 3.0, scale: float = 0.5):
+
+    concentration = jnp.full((D,), concentration)
+    scale = jnp.full((D,), scale)
+    prior = InverseGammaNatParam(alpha_plus_one=concentration + 1, beta=scale)
 
     def _likelihood(context: GibbsContext):
-        """
-        Construct p(H0 | xi) as an inverse-Gamma function of xi.
-        """
-        H0_diag = jnp.diag(context.params["H0"])
-        alpha = jnp.full((D,), -0.5)
-        return InverseGammaNatParam(alpha_plus_one=alpha + 1, beta=1 / H0_diag)
-
-    def _unpack(sample: Array):
-        return {"H0_xi": sample}
-
-    return ConjugateBlock(
-        name="H0_xi",
-        prior=_prior,
-        likelihood=_likelihood,
-        unpack=_unpack,
-    )
-
-
-def _construct_H0_block(D):
-
-    def _prior(params: dict):
-        """
-        H0_d | xi_d ~ InvGamma(1 / 2, 1 / xi_d).
-        """
-        xi = params["H0_xi"]
-        alpha = jnp.full((D,), 0.5)
-        return InverseGammaNatParam(alpha_plus_one=alpha + 1, beta=1 / xi)
-
-    def _likelihood(context: GibbsContext):
-        """
-        Construct p(eta_1 | m_0, H_0) as an inverse-Gamma function of the diagonal entries of H_0.
-        """
         m0 = context.params["m0"]
-        eta1 = context.trajectory[1][0]
-        return InverseGammaNatParam.from_gaussian(value=eta1, mean=m0)
+        eta0 = context.trajectory[1][0]
+        return InverseGammaNatParam.from_gaussian(value=eta0, mean=m0)
 
     def _unpack(sample: Array):
         return {"H0": jnp.diag(sample)}
 
     return ConjugateBlock(
         name="H0",
-        prior=_prior,
+        prior=prior,
         likelihood=_likelihood,
         unpack=_unpack,
     )
@@ -167,7 +196,7 @@ def _construct_H_block(D):
     )
 
 
-def _construct_R_block(D, concentration: float = 1.0, scale: float = 1.0):
+def _construct_R_block(D, concentration: float = 3.0, scale: float = 0.001):
 
     concentration = jnp.full((D,), concentration)
     scale = jnp.full((D,), scale)

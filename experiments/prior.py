@@ -9,7 +9,7 @@ from jax.scipy.stats import norm
 
 from rbsmc.utils.mvn import mvn_logpdf
 
-from experiments.corporate_bonds.utils import ou_diag_transition, _diag_or_vector_at, _logdiffexp
+from experiments.utils import ou_diag_transition, _diag_or_vector_at, _logdiffexp
 
 
 ####################################

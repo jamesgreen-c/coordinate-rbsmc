@@ -8,8 +8,8 @@ from jax import Array
 from jax.random import PRNGKey
 from jax.tree_util import tree_map
 
-from experiments.bayesian.utils import (ou_diag_transition, _diag_or_vector_at)
-from experiments.bayesian.dataset import CorporateBondDataset
+from experiments.utils import (ou_diag_transition, _diag_or_vector_at)
+from experiments.dataset import CorporateBondDataset
 
 from rbsmc.utils.iw import InverseWhishart
 from rbsmc.utils.inverse_gamma import inverse_gamma
