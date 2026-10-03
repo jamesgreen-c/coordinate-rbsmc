@@ -74,7 +74,7 @@ DS = (3, 10, 15, 20, 50)
 TS = (711,)
 KERNELS = (0, 1, 2)
 
-combination = [(D, T, kernel) for D, T, kernel in product(DS, TS, KERNELS) if D < 15 or T >= 2000][::-1]
+combination = [(D, T, kernel) for D, T, kernel in product(DS, TS, KERNELS)][::-1]
 print(f"Number of experiments: {len(combination)}")
 
 if args.i != -1 and not (0 <= args.i < len(combination)):
