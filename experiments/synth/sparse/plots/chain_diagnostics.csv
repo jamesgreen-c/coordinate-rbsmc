@@ -1,0 +1,16 @@
+configuration,regime,D,kernel,dataset_id,chains,max_rank_rhat
+T=711_N=31_burnin=4000_samples=2000_thin=20,One observation per bond every 3 days,10,CSMC,16434407ed2e7fd6,1,nan
+T=711_N=31_burnin=4000_samples=2000_thin=20,One observation per bond every 3 days,15,CSMC,5f7875e73decc103,1,nan
+T=711_N=31_burnin=4000_samples=2000_thin=20,One observation per bond every 3 days,20,CSMC,aa6d5a25d0fff6a2,1,nan
+T=711_N=31_burnin=4000_samples=2000_thin=20,One observation per bond every 3 days,3,CSMC,17ae9b0bf19bca63,1,nan
+T=711_N=31_burnin=4000_samples=2000_thin=20,One observation per bond every 3 days,50,CSMC,c3207bda7b2ae0d5,1,nan
+T=711_N=31_burnin=4000_samples=2000_thin=20,One observation per bond every 3 days,10,GUEANT,16434407ed2e7fd6,1,nan
+T=711_N=31_burnin=4000_samples=2000_thin=20,One observation per bond every 3 days,15,GUEANT,5f7875e73decc103,1,nan
+T=711_N=31_burnin=4000_samples=2000_thin=20,One observation per bond every 3 days,20,GUEANT,aa6d5a25d0fff6a2,1,nan
+T=711_N=31_burnin=4000_samples=2000_thin=20,One observation per bond every 3 days,3,GUEANT,17ae9b0bf19bca63,1,nan
+T=711_N=31_burnin=4000_samples=2000_thin=20,One observation per bond every 3 days,50,GUEANT,c3207bda7b2ae0d5,1,nan
+T=711_N=31_burnin=4000_samples=2000_thin=20,One observation per bond every 3 days,10,RB_CSMC,16434407ed2e7fd6,1,nan
+T=711_N=31_burnin=4000_samples=2000_thin=20,One observation per bond every 3 days,15,RB_CSMC,5f7875e73decc103,1,nan
+T=711_N=31_burnin=4000_samples=2000_thin=20,One observation per bond every 3 days,20,RB_CSMC,aa6d5a25d0fff6a2,1,nan
+T=711_N=31_burnin=4000_samples=2000_thin=20,One observation per bond every 3 days,3,RB_CSMC,17ae9b0bf19bca63,1,nan
+T=711_N=31_burnin=4000_samples=2000_thin=20,One observation per bond every 3 days,50,RB_CSMC,c3207bda7b2ae0d5,1,nan
