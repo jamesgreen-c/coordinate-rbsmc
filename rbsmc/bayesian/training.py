@@ -83,11 +83,11 @@ class ParticleGibbs:
         """
         key_e, key_m = jr.split(key)
 
-        # E step
+        # sample states
         state, aux = self.smc.sample(key_e, params, state, data)
         energy = 0
 
-        # M step
+        # sample parameters
         new_params = self.gibbs.update(key_m, params, state.trajectory, dts, data)
         return energy, new_params, state, aux
 

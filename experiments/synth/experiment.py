@@ -1,6 +1,6 @@
 import argparse
 import os
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 
 import numpy as np
@@ -10,6 +10,7 @@ import jax
 jax.config.update('jax_enable_x64', True)
 
 from jax.random import PRNGKey
+from jax import tree_util
 
 from rbsmc.utils.common import force_move
 from rbsmc.utils.resamplings import killing
@@ -117,9 +118,10 @@ Configuration
 """)
 
 
+
 def one_experiment(key: PRNGKey):
 
-    # generate data
+    # generate one dataset shared by all chains
     key, data_key = jr.split(key)
     dataset = get_data(key=data_key, dim=args.D, dts=DTs, params=MODEL_PARAMS)
 
@@ -133,13 +135,29 @@ def one_experiment(key: PRNGKey):
     # gibbs config
     BLOCKS = make_blocks(dataset=scaled_dataset, full_inference=args.full_inference)
     GIBBS = Gibbs(blocks=BLOCKS)
-    SAMPLER = ParticleGibbs(smc=KERNEL, gibbs=GIBBS, config=CONFIG)
 
-    # run particle Gibbs. Passing prior params uses true params only for those without Gibbs blocks
-    references, params, replacement_rates = SAMPLER.run(
-        scaled_dataset.data, DTs, scaled_dataset.params
-    )
-    return references, params, replacement_rates, SAMPLER.energies, dataset, scaled_dataset, estimated_params
+    references = []
+    params = []
+    replacement_rates = []
+
+    for m in range(args.M):
+
+        # distinct sampler seed for each chain
+        config_m = replace(CONFIG, seed=CONFIG.seed + m)
+        SAMPLER = ParticleGibbs(smc=KERNEL, gibbs=GIBBS, config=config_m)
+        references_m, params_m, replacement_rates_m = SAMPLER.run(
+            scaled_dataset.data, DTs, scaled_dataset.params
+        )
+
+        references.append(tree_util.tree_map(np.asarray, references_m))
+        params.append(tree_util.tree_map(np.asarray, params_m))
+        replacement_rates.append(np.asarray(replacement_rates_m))
+
+    # every array has a leading chain dimension, including when M=1
+    references = tree_util.tree_map(lambda *xs: np.stack(xs, axis=0), *references)
+    params = tree_util.tree_map(lambda *xs: np.stack(xs, axis=0), *params)
+    replacement_rates = np.stack(replacement_rates, axis=0)
+    return references, params, replacement_rates, dataset, scaled_dataset, estimated_params
 
 
 def _pack_object(value):

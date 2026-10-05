@@ -196,7 +196,7 @@ def _construct_H_block(D):
     )
 
 
-def _construct_R_block(D, concentration: float = 3.0, scale: float = 0.001):
+def _construct_R_block(D, concentration: float = 3.0, scale: float = 0.003):
 
     concentration = jnp.full((D,), concentration)
     scale = jnp.full((D,), scale)
