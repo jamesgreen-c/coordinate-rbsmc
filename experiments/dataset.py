@@ -145,125 +145,137 @@ class CorporateBondDataset(Dataset):
 #########################################
 #       estimate params from data       # 
 #########################################
-def estimate_params_from_data(dataset: CorporateBondDataset, alpha_scale: float = 1.0, H0_scale: float = 1.0):
-    """
-    Initialise model parameters from standardised transaction and CBBT data.
+# def estimate_params_from_data(dataset: CorporateBondDataset, alpha_scale: float = 1.0, H0_scale: float = 1.0):
+#     """
+#     Initialise model parameters from standardised transaction and CBBT data.
 
-    Q is restricted to diagonal because each bond is fitted independently.
-    H0 is calibrated rather than statistically estimated.
-    """
-    # dataset = dataset.standardised_data if not dataset.standardised else dataset
-    PSI, A, Q = _estimate_ou_params(dataset)
-    # M0, H, H0 = _estimate_mid_params(dataset, PSI, H0_scale)
+#     Q is restricted to diagonal because each bond is fitted independently.
+#     H0 is calibrated rather than statistically estimated.
+#     """
+#     # dataset = dataset.standardised_data if not dataset.standardised else dataset
+#     PSI, A, Q = _estimate_ou_params(dataset)
+#     # M0, H, H0 = _estimate_mid_params(dataset, PSI, H0_scale)
 
-    ALPHA = alpha_scale * PSI
-    Q0 = np.diag(np.diag(Q) / (2.0 * np.diag(A)))
-    # Q0 = solve_continuous_lyapunov(A, Q)
+#     ALPHA = alpha_scale * PSI
+#     Q0 = np.diag(np.diag(Q) / (2.0 * np.diag(A)))
+#     # Q0 = solve_continuous_lyapunov(A, Q)
 
-    return {
-        # "m0": jnp.asarray(M0),
-        # "H0": jnp.asarray(H0),
-        # "H": jnp.asarray(H),
-        "Q0": jnp.asarray(Q0),
-        "Q": jnp.asarray(Q),
-        "A": jnp.asarray(A),
-        "psi": jnp.asarray(PSI),
-        "alpha": jnp.asarray(ALPHA),
-    }
+#     return {
+#         # "m0": jnp.asarray(M0),
+#         # "H0": jnp.asarray(H0),
+#         # "H": jnp.asarray(H),
+#         "Q0": jnp.asarray(Q0),
+#         "Q": jnp.asarray(Q),
+#         "A": jnp.asarray(A),
+#         "psi": jnp.asarray(PSI),
+#         "alpha": jnp.asarray(ALPHA),
+#     }
 
 
-def _estimate_ou_params(dataset: CorporateBondDataset):
-    """
-    Fit independent OU processes to standardised transaction-CBBT
-    half-spread proxies.
-    """
+# def _estimate_ou_params(dataset: CorporateBondDataset):
+#     """
+#     Fit independent OU processes to standardised transaction-CBBT
+#     half-spread proxies.
+#     """
 
-    def _objective(theta, times, x):
-        log_A, log_Q = theta
+#     def _objective(theta, times, x):
+#         log_A, log_Q = theta
 
-        A = np.exp(log_A)
-        Q = np.exp(log_Q)
+#         A = np.exp(log_A)
+#         Q = np.exp(log_Q)
 
-        Q0 = Q / (2.0 * A)
-        loss = 0.5 * (np.log(2.0 * np.pi * Q0) + x[0]**2 / Q0)
+#         Q0 = Q / (2.0 * A)
+#         loss = 0.5 * (np.log(2.0 * np.pi * Q0) + x[0]**2 / Q0)
 
-        elapsed = np.diff(times)
-        F = np.exp(-A * elapsed)
-        Q_k = Q * (1.0 - np.exp(-2.0 * A * elapsed)) / (2.0 * A)
-        residuals = x[1:] - F * x[:-1]
+#         elapsed = np.diff(times)
+#         F = np.exp(-A * elapsed)
+#         Q_k = Q * (1.0 - np.exp(-2.0 * A * elapsed)) / (2.0 * A)
+#         residuals = x[1:] - F * x[:-1]
 
-        return loss + 0.5 * np.sum(
-            np.log(2.0 * np.pi * Q_k) + residuals**2 / Q_k
-        )
+#         return loss + 0.5 * np.sum(
+#             np.log(2.0 * np.pi * Q_k) + residuals**2 / Q_k
+#         )
 
-    std_obs_values, bond_idxs, event_types = dataset.data
+#     std_obs_values, bond_idxs, event_types = dataset.data
 
-    trades = np.asarray(std_obs_values)
-    bond_idxs = np.asarray(bond_idxs)
-    std_cbbt = np.asarray(dataset.CBBT)
-    dts = np.asarray(dataset.dts)
-    times = np.concatenate((np.zeros(1), np.cumsum(dts)))
+#     trades = np.asarray(std_obs_values)
+#     bond_idxs = np.asarray(bond_idxs)
+#     std_cbbt = np.asarray(dataset.CBBT)
+#     dts = np.asarray(dataset.dts)
+#     times = np.concatenate((np.zeros(1), np.cumsum(dts)))
 
-    D = dataset.D
+#     D = dataset.D
 
-    A = np.zeros((D, D))
-    Q = np.zeros((D, D))
-    PSI = np.zeros(D)
+#     A = np.zeros((D, D))
+#     Q = np.zeros((D, D))
+#     PSI = np.zeros(D)
 
-    for d in range(D):
-        indices = np.flatnonzero(bond_idxs == d)
+#     for d in range(D):
+#         indices = np.flatnonzero(bond_idxs == d)
 
-        bond_trades = trades[indices]
-        bond_cbbt = std_cbbt[indices]
-        bond_times = times[indices]
+#         bond_trades = trades[indices]
+#         bond_cbbt = std_cbbt[indices]
+#         bond_times = times[indices]
 
-        psi_proxy = np.abs(bond_trades - bond_cbbt)
-        valid = np.isfinite(psi_proxy) & np.isfinite(bond_times) & (psi_proxy > 0)
+#         psi_proxy = np.abs(bond_trades - bond_cbbt)
+#         valid = np.isfinite(psi_proxy) & np.isfinite(bond_times) & (psi_proxy > 0)
 
-        psi_proxy = psi_proxy[valid]
-        bond_times = bond_times[valid]
+#         psi_proxy = psi_proxy[valid]
+#         bond_times = bond_times[valid]
 
-        if len(psi_proxy) < 3:
-            raise ValueError(f"Not enough valid spread proxies for bond {d}")
+#         if len(psi_proxy) < 3:
+#             raise ValueError(f"Not enough valid spread proxies for bond {d}")
 
-        log_psi = np.log(np.maximum(psi_proxy, 1e-8))
-        log_PSI_d = np.median(log_psi)
-        x = log_psi - log_PSI_d
+#         log_psi = np.log(np.maximum(psi_proxy, 1e-8))
+#         log_PSI_d = np.median(log_psi)
+#         x = log_psi - log_PSI_d
 
-        total_time = bond_times[-1] - bond_times[0]
-        min_A = 1.0 / total_time
+#         total_time = bond_times[-1] - bond_times[0]
+#         min_A = 1.0 / total_time
 
-        theta_init = np.array([
-            np.log(max(1.0, min_A)),
-            np.log(0.1),
-        ])
+#         theta_init = np.array([
+#             np.log(max(1.0, min_A)),
+#             np.log(0.1),
+#         ])
 
-        result = minimize(
-            _objective,
-            theta_init,
-            args=(bond_times, x),
-            method="L-BFGS-B",
-            bounds=[
-                (np.log(min_A), np.log(1e3)),
-                (np.log(1e-8), np.log(1e3)),
-            ],
-        )
+#         result = minimize(
+#             _objective,
+#             theta_init,
+#             args=(bond_times, x),
+#             method="L-BFGS-B",
+#             bounds=[
+#                 (np.log(min_A), np.log(1e3)),
+#                 (np.log(1e-8), np.log(1e3)),
+#             ],
+#         )
 
-        if not result.success or not np.all(np.isfinite(result.x)):
-            raise RuntimeError(f"OU estimation failed for bond {d}: {result.message}")
+#         if not result.success or not np.all(np.isfinite(result.x)):
+#             raise RuntimeError(f"OU estimation failed for bond {d}: {result.message}")
         
-        log_A_d, log_Q_d = result.x
+#         log_A_d, log_Q_d = result.x
 
-        PSI[d] = np.exp(log_PSI_d)
-        A[d, d] = np.exp(log_A_d)
-        Q[d, d] = np.exp(log_Q_d)
+#         PSI[d] = np.exp(log_PSI_d)
+#         A[d, d] = np.exp(log_A_d)
+#         Q[d, d] = np.exp(log_Q_d)
 
-    # print(f"PSI: {PSI}")
-    # print(f"A: {A}")
-    # print(f"Q: {Q}")
+#     # print(f"PSI: {PSI}")
+#     # print(f"A: {A}")
+#     # print(f"Q: {Q}")
 
-    return PSI, A, Q
+#     return PSI, A, Q
 
+
+
+
+
+
+
+
+
+
+##########################
+#           OLD          #
+##########################
 
 # def _estimate_mid_params(dataset: CorporateBondDataset, PSI: np.ndarray, H0_scale: float):
 #     """

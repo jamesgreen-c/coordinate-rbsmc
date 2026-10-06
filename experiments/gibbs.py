@@ -28,22 +28,29 @@ def make_blocks(dataset: CorporateBondDataset, full_inference: bool = False):
     assert dataset.standardised, "Must pass standardised dataset to male_blocks"
 
     H_block = _construct_H_block(D)
-    m0_block = _construct_m0_block(D, dataset)
-    # H0_xi_block = _construct_auxiliary_H0_block(D)
-    H0_block = _construct_H0_block(D)
-    R_block = _construct_R_block(D)
-
-    blocks = [H_block, m0_block, H0_block, R_block]
-    # blocks = [] 
+    blocks = [H_block]
 
     if full_inference:
-        # TODO: add optionality for inference on PSI, ALPHA, Q, Q0, R as well
-        A_block = None
-        Q_block = None
+
+        m0_block = _construct_m0_block(D, dataset)
+        H0_block = _construct_H0_block(D)
+        A_block = _construct_A_block(D)
+        R_block = _construct_R_block(D)
         Q0_block = _construct_Q0_block(D)
-        PSI_block = None
-        ALPHA_block = None
-        blocks.extend([A_block, Q_block, Q0_block, PSI_block, ALPHA_block])
+        Q_block = _construct_Q_block(D)
+        PSI_block = _construct_PSI_block(D)
+        ALPHA_block = _construct_ALPHA_block(D)
+
+        blocks.extend([
+            m0_block, 
+            H0_block, 
+            R_block, 
+            A_block, 
+            Q_block, 
+            Q0_block, 
+            PSI_block, 
+            ALPHA_block
+        ])
     
     return blocks
 
@@ -79,59 +86,6 @@ def _construct_m0_block(D, dataset: CorporateBondDataset, mean = 0.75, variance=
         unpack=_unpack
     )
 
-
-# def _construct_auxiliary_H0_block(D, scale=0.5):
-
-#     alpha=jnp.full((D,), 0.5)
-#     beta=jnp.full((D,), 1 / scale**2)
-#     _prior = InverseGammaNatParam(alpha_plus_one=alpha + 1, beta=beta)
-
-#     def _likelihood(context: GibbsContext):
-#         """
-#         Construct p(H0 | xi) as an inverse-Gamma function of xi.
-#         """
-#         H0_diag = jnp.diag(context.params["H0"])
-#         alpha = jnp.full((D,), -0.5)
-#         return InverseGammaNatParam(alpha_plus_one=alpha + 1, beta=1 / H0_diag)
-
-#     def _unpack(sample: Array):
-#         return {"H0_xi": sample}
-
-#     return ConjugateBlock(
-#         name="H0_xi",
-#         prior=_prior,
-#         likelihood=_likelihood,
-#         unpack=_unpack,
-#     )
-
-
-# def _construct_H0_block(D):
-
-#     def _prior(params: dict):
-#         """
-#         H0_d | xi_d ~ InvGamma(1 / 2, 1 / xi_d).
-#         """
-#         xi = params["H0_xi"]
-#         alpha = jnp.full((D,), 0.5)
-#         return InverseGammaNatParam(alpha_plus_one=alpha + 1, beta=1 / xi)
-
-#     def _likelihood(context: GibbsContext):
-#         """
-#         Construct p(eta_1 | m_0, H_0) as an inverse-Gamma function of the diagonal entries of H_0.
-#         """
-#         m0 = context.params["m0"]
-#         eta1 = context.trajectory[1][0]
-#         return InverseGammaNatParam.from_gaussian(value=eta1, mean=m0)
-
-#     def _unpack(sample: Array):
-#         return {"H0": jnp.diag(sample)}
-
-#     return ConjugateBlock(
-#         name="H0",
-#         prior=_prior,
-#         likelihood=_likelihood,
-#         unpack=_unpack,
-#     )
 
 def _construct_H0_block(D, concentration: float = 3.0, scale: float = 0.5):
 
@@ -265,7 +219,7 @@ def _construct_R_block(D, concentration: float = 3.0, scale: float = 0.003):
     )
 
 
-def _construct_Q0_block(D, concentration: float = 1.0, scale: float = 1.0):
+def _construct_Q0_block(D, concentration: float = 3.0, scale: float = 0.3):
 
     concentration = jnp.full((D,), concentration)
     scale = jnp.full((D,), scale)
@@ -287,7 +241,7 @@ def _construct_Q0_block(D, concentration: float = 1.0, scale: float = 1.0):
     )
 
 
-def _construct_Q_block(D, concentration: float = 1.0, scale: float = 1.0):
+def _construct_Q_block(D, concentration: float = 2.0, scale: float = 0.5):
 
     concentration = jnp.full((D,), concentration)
     scale = jnp.full((D,), scale)
@@ -325,12 +279,7 @@ def _construct_Q_block(D, concentration: float = 1.0, scale: float = 1.0):
     )
 
 
-def _construct_A_block(
-        D,
-        mean=0.0,
-        variance=1.0,
-        proposal_variance=0.01,
-):
+def _construct_A_block(D, mean=-1.0, variance=0.5, proposal_variance=0.005):
 
     mean = jnp.broadcast_to(jnp.asarray(mean), (D,))
     covariance = variance * jnp.eye(D)
@@ -370,12 +319,7 @@ def _construct_A_block(
     )
 
 
-def _construct_PSI_block(
-        D,
-        mean=0.0,
-        variance=1.0,
-        proposal_variance=0.01,
-):
+def _construct_PSI_block(D, mean=0.0, variance=1.0, proposal_variance=0.005):
 
     mean = jnp.broadcast_to(jnp.asarray(mean), (D,))
     covariance = variance * jnp.eye(D)
@@ -421,12 +365,7 @@ def _construct_PSI_block(
     )
 
 
-def _construct_ALPHA_block(
-        D,
-        mean=0.0,
-        variance=1.0,
-        proposal_variance=0.01,
-):
+def _construct_ALPHA_block(D, mean=0.0, variance=1.0, proposal_variance=0.01):
 
     mean = jnp.broadcast_to(jnp.asarray(mean), (D,))
     covariance = variance * jnp.eye(D)

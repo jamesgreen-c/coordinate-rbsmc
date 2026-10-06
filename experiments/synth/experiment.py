@@ -21,7 +21,7 @@ from rbsmc.bayesian.gibbs import Gibbs
 from experiments.synth.data import get_data, get_model_params
 from experiments.kernels import KernelType
 from experiments.gibbs import make_blocks
-from experiments.dataset import estimate_params_from_data
+# from experiments.dataset import estimate_params_from_data
 
 
 parser = argparse.ArgumentParser()
@@ -113,7 +113,7 @@ Configuration
     - backward mode:     {BACKWARD_MODE}
     - full inference:    {args.full_inference}
     - thin:              {CONFIG.thin}
-    - saved paths:       {CONFIG.saved_paths}
+    - saved paths:       {CONFIG.saved_paths if CONFIG.saved_paths is not None else "all"}
 ========================
 """)
 
@@ -125,11 +125,11 @@ def one_experiment(key: PRNGKey):
     key, data_key = jr.split(key)
     dataset = get_data(key=data_key, dim=args.D, dts=DTs, params=MODEL_PARAMS)
 
-    estimated_params = {}
-    if not args.full_inference:
-        estimated_params = estimate_params_from_data(dataset=dataset)
+    # estimated_params = {}
+    # if not args.full_inference:
+    #     estimated_params = estimate_params_from_data(dataset=dataset)
+    # dataset.params = {**dataset.params, **estimated_params}
 
-    dataset.params = {**dataset.params, **estimated_params}
     scaled_dataset = dataset.standardised_data
 
     # gibbs config
@@ -157,7 +157,7 @@ def one_experiment(key: PRNGKey):
     references = tree_util.tree_map(lambda *xs: np.stack(xs, axis=0), *references)
     params = tree_util.tree_map(lambda *xs: np.stack(xs, axis=0), *params)
     replacement_rates = np.stack(replacement_rates, axis=0)
-    return references, params, replacement_rates, dataset, scaled_dataset, estimated_params
+    return references, params, replacement_rates, dataset, scaled_dataset # , estimated_params
 
 
 def _pack_object(value):
@@ -174,7 +174,7 @@ def _serialise_reference(reference_history):
 
 if __name__ == "__main__":
 
-    references, params, replacement_rates, energies, dataset, scaled_dataset, estimated_params = one_experiment(EXPERIMENT_KEY)
+    references, params, replacement_rates, dataset, scaled_dataset = one_experiment(EXPERIMENT_KEY)
 
     # save results
     RESULTS_ROOT.mkdir(parents=True, exist_ok=True)
@@ -200,11 +200,11 @@ if __name__ == "__main__":
         DATAPATH,
         references=_pack_object(_serialise_reference(references)),
         params=params,
-        energies=energies,
+        # energies=energies,
         replacement_rates=replacement_rates,
         dataset=dataset,
         true_params=MODEL_PARAMS,
-        estimated_params=estimated_params,
+        # estimated_params=estimated_params,
         standardisation_means=scaled_dataset.means,
         standardisation_scales=scaled_dataset.stds,
         config=_pack_object(asdict(CONFIG)),
