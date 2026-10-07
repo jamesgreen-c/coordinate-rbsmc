@@ -150,7 +150,7 @@ def _construct_H_block(D):
     )
 
 
-def _construct_R_block(D, concentration: float = 3.0, scale: float = 0.003):
+def _construct_R_block(D, concentration: float = 3.0, scale: float = 0.001):
 
     concentration = jnp.full((D,), concentration)
     scale = jnp.full((D,), scale)
@@ -302,7 +302,8 @@ def _construct_A_block(D, mean=-1.0, variance=0.5, proposal_variance=0.005):
         residuals = zs[1:] - means
         variances = constants * Q[None, :]
 
-        return -0.5 * jnp.sum(jnp.log(2 * jnp.pi * variances) + residuals**2 / variances)
+        return -0.5 * jnp.sum(jnp.log(2 * jnp.pi * variances) + residuals**2 / variances, axis=0)
+        # return -0.5 * jnp.sum(jnp.log(2 * jnp.pi * variances) + residuals**2 / variances)
 
     def _unpack(sample: Array):
         return {
@@ -316,10 +317,11 @@ def _construct_A_block(D, mean=-1.0, variance=0.5, proposal_variance=0.005):
         likelihood=_likelihood,
         unpack=_unpack,
         covariance=proposal_variance * jnp.eye(D),
+        coordinatewise=True,
     )
 
 
-def _construct_PSI_block(D, mean=0.0, variance=1.0, proposal_variance=0.005):
+def _construct_PSI_block(D, mean=0.0, variance=1.0, proposal_variance=0.001):
 
     mean = jnp.broadcast_to(jnp.asarray(mean), (D,))
     covariance = variance * jnp.eye(D)
@@ -344,11 +346,19 @@ def _construct_PSI_block(D, mean=0.0, variance=1.0, proposal_variance=0.005):
             observed_etas - half_spreads,
             observed_etas + half_spreads,
         )
-
         log_likelihoods = -0.5 * (jnp.log(2 * jnp.pi * variances) + (obs_values - means)**2 / variances)
 
         # D2D observations do not depend on PSI
-        return jnp.sum(jnp.where(event_types < 2, log_likelihoods, 0.0))
+        return jnp.bincount(
+            bond_idxs,
+            weights=jnp.where(event_types < 2, log_likelihoods, 0.0),
+            length=D,
+        )
+
+        # log_likelihoods = -0.5 * (jnp.log(2 * jnp.pi * variances) + (obs_values - means)**2 / variances)
+
+        # # D2D observations do not depend on PSI
+        # return jnp.sum(jnp.where(event_types < 2, log_likelihoods, 0.0))
 
     def _unpack(sample: Array):
         return {
@@ -362,6 +372,7 @@ def _construct_PSI_block(D, mean=0.0, variance=1.0, proposal_variance=0.005):
         likelihood=_likelihood,
         unpack=_unpack,
         covariance=proposal_variance * jnp.eye(D),
+        coordinatewise=True,
     )
 
 
@@ -405,7 +416,14 @@ def _construct_ALPHA_block(D, mean=0.0, variance=1.0, proposal_variance=0.01):
         log_likelihoods = _log_normal_interval(lower, upper) - jnp.log(2 * observed_alphas)
 
         # Only D2D observations depend on alpha
-        return jnp.sum(jnp.where(event_types == 2, log_likelihoods, 0.0))
+        return jnp.bincount(
+            bond_idxs,
+            weights=jnp.where(event_types == 2, log_likelihoods, 0.0),
+            length=D,
+        )
+
+        # # Only D2D observations depend on alpha
+        # return jnp.sum(jnp.where(event_types == 2, log_likelihoods, 0.0))
 
     def _unpack(sample: Array):
         return {
@@ -419,4 +437,5 @@ def _construct_ALPHA_block(D, mean=0.0, variance=1.0, proposal_variance=0.01):
         likelihood=_likelihood,
         unpack=_unpack,
         covariance=proposal_variance * jnp.eye(D),
+        coordinatewise=True,
     )

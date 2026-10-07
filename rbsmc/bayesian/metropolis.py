@@ -8,7 +8,7 @@ from typing import Any
 import jax.numpy as jnp
 import jax.random as jr
 
-from jax import Array
+from jax import Array, vmap
 from jax.random import PRNGKey
 from jax.scipy.linalg import solve
 
@@ -23,6 +23,8 @@ class MetropolisWithinGibbs(GibbsBlock, ABC):
     likelihood: Callable[[GibbsContext], Array]
     unpack: Callable[[Array], dict[str, Any]]
 
+    coordinatewise: bool = False
+
     def _get_prior(self, params: dict[str, Any]):
         return self.prior(params) if callable(self.prior) else self.prior
 
@@ -34,6 +36,18 @@ class MetropolisWithinGibbs(GibbsBlock, ABC):
     def proposal(self, params: dict[str, Any]) -> NatParam:
         pass
 
+    # def log_target(self, value: Array, context: GibbsContext):
+    #     params = {**context.params, **self.unpack(value)}
+    #     candidate_context = GibbsContext(
+    #         trajectory=context.trajectory,
+    #         dts=context.dts,
+    #         data=context.data,
+    #         params=params,
+    #     )
+
+    #     prior = self._get_prior(params)
+    #     return prior.dist_param.log_pdf(value) + self.likelihood(candidate_context)
+
     def log_target(self, value: Array, context: GibbsContext):
         params = {**context.params, **self.unpack(value)}
         candidate_context = GibbsContext(
@@ -44,7 +58,20 @@ class MetropolisWithinGibbs(GibbsBlock, ABC):
         )
 
         prior = self._get_prior(params)
-        return prior.dist_param.log_pdf(value) + self.likelihood(candidate_context)
+        likelihood = self.likelihood(candidate_context)
+
+        if self.coordinatewise:
+
+            if likelihood.shape != value.shape:
+                raise ValueError("Coordinate-wise MH requires one likelihood contribution per coordinate.")
+               
+            log_prior = vmap(
+                lambda i: jnp.sum(prior.dist_param.marginal(i).log_pdf(value[i][None]))
+            )(jnp.arange(value.size))
+
+            return log_prior + likelihood
+        
+        return prior.dist_param.log_pdf(value) + jnp.sum(likelihood)
 
     def accept_reject(
             self,
@@ -64,6 +91,62 @@ class MetropolisWithinGibbs(GibbsBlock, ABC):
 
         accept = jnp.log(jr.uniform(key)) < jnp.minimum(log_acceptance_ratio, 0.0)
         return jnp.where(accept, proposed, current)
+
+    def accept_reject(
+            self,
+            key: PRNGKey,
+            current: Array,
+            proposed: Array,
+            forward_proposal: NatParam,
+            reverse_proposal: NatParam,
+            context: GibbsContext,
+    ):
+        """
+        Accept jointly, or independently for factorised targets and proposals.
+
+        Coordinate-wise mode requires independent prior/proposal coordinates
+        and a likelihood returning their separate log-density contributions.
+        """
+        if self.coordinatewise and (current.ndim != 1 or proposed.shape != current.shape):
+            raise ValueError("Coordinate-wise MH requires matching parameter vectors.")
+
+        def _accept(key, current, proposed, log_current, log_proposed, forward, reverse):
+            log_acceptance_ratio = (
+                log_proposed - log_current
+                + jnp.sum(reverse.log_pdf(current))
+                - jnp.sum(forward.log_pdf(proposed))
+            )
+            accept = jnp.log(jr.uniform(key)) < jnp.minimum(log_acceptance_ratio, 0.0)
+            return jnp.where(accept, proposed, current)
+
+        log_current = self.log_target(current, context)
+        log_proposed = self.log_target(proposed, context)
+        forward_proposal = forward_proposal.dist_param
+        reverse_proposal = reverse_proposal.dist_param
+
+        if self.coordinatewise:
+
+            keys = jr.split(key, current.size)
+            _one = lambda i, key: _accept(
+                key, 
+                current[i][None], 
+                proposed[i][None], 
+                log_current[i], 
+                log_proposed[i], 
+                forward_proposal.marginal(i), 
+                reverse_proposal.marginal(i)
+            )[0]
+            return vmap(_one)(jnp.arange(current.size), keys)
+
+        return _accept(
+            key, 
+            current, 
+            proposed, 
+            log_current, 
+            log_proposed,
+            forward_proposal, 
+            reverse_proposal,
+        )
 
     def sample(self, key: PRNGKey, context: GibbsContext):
         proposal_key, accept_key = jr.split(key)
@@ -95,8 +178,10 @@ class RandomWalkMetropolis(MetropolisWithinGibbs):
     unpack: Callable[[Array], dict[str, Any]]
     covariance: Array
 
+    coordinatewise: bool = False
+
     def proposal(self, params: dict[str, Any]):
-        precision = solve(self.covariance, jnp.eye(self.covariance.shape[0]))
+        precision = solve(self.covariance, jnp.eye(self.covariance.shape[0]))   # TODO only needs to be done once
         current = params[self.name]
         return GaussianNatParam(precision=precision, precision_mean=precision @ current)
 

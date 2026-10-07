@@ -15,6 +15,11 @@ from rbsmc.utils.inverse_gamma import inverse_gamma, logpdf as ig_logpdf
 
 
 class DistParam(ABC):
+
+    def marginal(self, index: int) -> DistParam:
+        """Return the distribution of a single coordinate."""
+        raise NotImplementedError
+    
     @property
     @abstractmethod
     def nat_param(self) -> NatParam:
@@ -88,6 +93,10 @@ class GaussianNatParam(NatParam):
 class GaussianDistParam(DistParam):
     mean: Array
     cov: Array
+
+    def marginal(self, index: int) -> GaussianDistParam:
+        """Return a one-dimensional Gaussian, with event shape (1,)."""
+        return GaussianDistParam(self.mean[index][None], self.cov[index, index][None, None])
 
     @property
     def nat_param(self) -> GaussianNatParam:
