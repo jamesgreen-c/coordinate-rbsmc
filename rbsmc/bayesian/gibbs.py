@@ -90,13 +90,38 @@ class Gibbs:
             params = {**params, **block.init(_key, params)}
         return params
 
-    def update(self, key: PRNGKey, params: dict, trajectory: Array, dts: Array, data):
+    def update(
+            self, 
+            key: PRNGKey, 
+            params: dict, 
+            trajectory: Array, 
+            dts: Array, 
+            data, 
+            repeat: int = 1
+        ):
         """ Run a set of sequential gibbs samples """
-        keys = jr.split(key, len(self.blocks))
+        
+        def sweep(current_params, sweep_key):
+            keys = jr.split(sweep_key, len(self.blocks))
+            for block_key, block in zip(keys, self.blocks):
+                context = GibbsContext(
+                    trajectory=trajectory,
+                    dts=dts,
+                    data=data,
+                    params=current_params,
+                )
+                current_params = {**current_params, **block.sample(block_key, context)}
+            return current_params, None
 
-        new_params = params
-        for _key, _block in zip(keys, self.blocks):
-            context = GibbsContext(trajectory=trajectory, dts=dts, data=data, params=new_params)
-            new_params = {**new_params, **_block.sample(_key, context)}
-        return new_params
+        keys = jr.split(key, len(repeat))
+        updated_params, _ = jax.lax.scan(sweep, params, keys)
+        return updated_params
+
+        # keys = jr.split(key, len(self.blocks))
     
+        # new_params = params
+        # for _ in range(repeat):
+        #     for _key, _block in zip(keys, self.blocks):
+        #         context = GibbsContext(trajectory=trajectory, dts=dts, data=data, params=new_params)
+        #         new_params = {**new_params, **_block.sample(_key, context)}
+        # return new_params
