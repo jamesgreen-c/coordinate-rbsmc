@@ -9,6 +9,7 @@ __pycache__/
 results/
 deprecated/
 _old/
+files/
 
 # Distribution / packaging
 .Python
