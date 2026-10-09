@@ -9,7 +9,7 @@ from jax.random import PRNGKey
 from jax.tree_util import tree_map
 
 from experiments.utils import (ou_diag_transition, _diag_or_vector_at)
-from experiments.dataset import CorporateBondDataset
+from experiments.synth.dataset import CorporateBondDataset
 
 from rbsmc.utils.iw import InverseWhishart
 from rbsmc.utils.inverse_gamma import inverse_gamma
@@ -175,7 +175,6 @@ def get_data(
         dts=dts,
         data=obs,
         states=xs,
-        cbbt=xs[1][jnp.arange(xs[1].shape[0]), bond_idxs],     # just use true mid prices as CBBT for now
         params=params,
     )
         

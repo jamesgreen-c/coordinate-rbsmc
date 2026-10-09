@@ -11,28 +11,24 @@ from rbsmc.bayesian.gibbs import ConjugateBlock, ConditionalBlock, GibbsContext
 from rbsmc.dists import GaussianNatParam, InverseGammaNatParam
 from rbsmc.bayesian.metropolis import RandomWalkMetropolis
 
-from experiments.dataset import CorporateBondDataset
-
 ##########################
 #     horseshoe prior    #
 ##########################
 
-def make_blocks(dataset: CorporateBondDataset, full_inference: bool = False):
+def make_blocks(D: int, full_inference: bool = False):
     """
     
     Parameters
     ----------
     D: latent state dimension (number of bonds)
     """
-    D = dataset.D
-    assert dataset.standardised, "Must pass standardised dataset to male_blocks"
 
     H_block = _construct_H_block(D)
     blocks = [H_block]
 
     if full_inference:
 
-        m0_block = _construct_m0_block(D, dataset)
+        m0_block = _construct_m0_block(D)
         H0_block = _construct_H0_block(D)
         A_block = _construct_A_block(D)
         R_block = _construct_R_block(D)
@@ -55,7 +51,7 @@ def make_blocks(dataset: CorporateBondDataset, full_inference: bool = False):
     return blocks
 
 
-def _construct_m0_block(D, dataset: CorporateBondDataset, mean = 0.75, variance=1.0):
+def _construct_m0_block(D, mean = 0.75, variance=1.0):
     
     # obs_values, bond_idxs, _ = dataset.data  # already standardised
     # mean = jnp.asarray([jnp.mean(obs_values[jnp.flatnonzero(bond_idxs == d)[:3]]) for d in range(D)])

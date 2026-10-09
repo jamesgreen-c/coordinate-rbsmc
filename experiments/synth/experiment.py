@@ -133,7 +133,7 @@ def one_experiment(key: PRNGKey):
     scaled_dataset = dataset.standardised_data
 
     # gibbs config
-    BLOCKS = make_blocks(dataset=scaled_dataset, full_inference=args.full_inference)
+    BLOCKS = make_blocks(D=args.D, full_inference=args.full_inference)
     GIBBS = Gibbs(blocks=BLOCKS)
 
     references = []
