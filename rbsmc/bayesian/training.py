@@ -1,14 +1,14 @@
 """Particle Gibbs training loop."""
 from dataclasses import dataclass
 from typing import Union, Tuple
-
 from tqdm import tqdm
+from time import perf_counter
 
 import numpy as np
 
 import jax
-from jax import Array, tree_util
 import jax.random as jr
+from jax import Array, tree_util
 
 from rbsmc.smc import Reference, SMC
 from rbsmc.bayesian.gibbs import Gibbs
@@ -21,12 +21,14 @@ class Config:
     samples: int = 1000
     burnin: int = 1000
     seed: int = 0
+    theta_steps: int = 1
 
     thin: int = 1
     saved_paths: int | None = None
 
     replacement_rate_window: int = 100
     debug: bool = False
+    benchmark: bool = False
 
     def __post_init__(self):
         if isinstance(self.thin, bool) or self.thin < 1:
@@ -43,6 +45,9 @@ class Config:
 
         if self.replacement_rate_window < 1:
             raise ValueError("replacement_rate_window must be a positive integer.")
+
+        if (not isinstance(self.theta_steps, int) or self.theta_steps < 1):
+            raise ValueError("theta_steps must be a positive integer.")
 
 
 class ParticleGibbs:
@@ -85,10 +90,12 @@ class ParticleGibbs:
 
         # sample states
         state, aux = self.smc.sample(key_e, params, state, data)
-        energy = 0
+        energy = 0 if self.config.debug else 0   # TODO? Not necessary
 
         # sample parameters
-        new_params = self.gibbs.update(key_m, params, state.trajectory, dts, data)
+        new_params = self.gibbs.update(
+            key_m, params, state.trajectory, dts, data, self.config.theta_steps
+        )
         return energy, new_params, state, aux
 
     def run(self, data, dts: Array, hyperparams: dict):
@@ -114,8 +121,14 @@ class ParticleGibbs:
         self.params = self.gibbs.init(param_key, hyperparams)
         state = self.smc.init(sample_key, self.params, data)
 
+        # optional benchmark
+        if self.config.benchmark:
+            costs = self.benchmark_steps(key, self.params, state, dts, data)
+            print(costs)
+
         # initialise stores
         self.energies = np.empty(total, dtype=np.float32)
+        self.elapsed_times = np.zeros(total + 1, dtype=np.float64)
         self._allocate_hist(state, self.params, T)
 
         # run
@@ -124,12 +137,15 @@ class ParticleGibbs:
             key, subkey = jr.split(key)
 
             energy, self.params, state, aux = train_step(subkey, self.params, state, dts, data)
+            jax.block_until_ready((self.params, state))
 
-            # track energy
+            # tracking
             energy_float = float(energy)
             self.energies[itr] = energy_float
-            pbar.set_postfix(loss=f"{energy_float:.3f}")
+            if self.config.debug:
+                pbar.set_postfix(loss=f"{energy_float:.3f}")  
 
+            self.elapsed_times[itr + 1] = float(pbar.format_dict["elapsed"])
             replacement_rates = self._calculate_replacement_rate(aux["replaced"])
 
             # store a thinned array for memory constraints
@@ -139,7 +155,7 @@ class ParticleGibbs:
 
         self._finalise_reference_hist()
 
-        return self.reference_hist, self.param_hist, self.replacement_rates
+        return self.reference_hist, self.param_hist, self.replacement_rates, self.elapsed_times
 
     def _allocate_hist(self, state, params, T):
         total = self.config.burnin + self.config.samples
@@ -242,3 +258,36 @@ class ParticleGibbs:
         self.replaced_count = min(self.replaced_count + 1, self.replaced_hist.shape[0])
 
         return self.replaced_hist[:self.replaced_count].mean(axis=0)
+
+    def benchmark_steps(self, key, params, state, dts, data, repeats=20):
+        """measure warmed CSMC and single parameter-sweep costs in seconds."""
+        
+        sample = jax.jit(self.smc.sample)
+        update = jax.jit(lambda k, p, x, dt, y: self.gibbs.update(k, p, x, dt, y, 1))
+
+        jax.block_until_ready((params, state, dts, data))
+        timings = []
+
+        for itr in range(repeats + 2):
+            key, sample_key, update_key = jr.split(key, 3)
+            jax.block_until_ready((sample_key, update_key))
+
+            start = perf_counter()
+            state, aux = sample(sample_key, params, state, data)
+            jax.block_until_ready((state, aux))
+            smc_seconds = perf_counter() - start
+
+            start = perf_counter()
+            params = update(update_key, params, state.trajectory, dts, data)
+            jax.block_until_ready(params)
+            gibbs_seconds = perf_counter() - start
+
+            # discard initial calls that may compile the functions.
+            if itr >= 2:
+                timings.append((smc_seconds, gibbs_seconds))
+
+        smc_seconds, gibbs_seconds = np.median(timings, axis=0)
+        return {
+            "smc_seconds": float(smc_seconds),
+            "gibbs_seconds": float(gibbs_seconds),
+        }
