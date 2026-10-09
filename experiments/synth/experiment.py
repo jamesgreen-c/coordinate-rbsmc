@@ -139,25 +139,35 @@ def one_experiment(key: PRNGKey):
     references = []
     params = []
     replacement_rates = []
+    run_times = []
+    sampling_times = []
 
     for m in range(args.M):
 
         # distinct sampler seed for each chain
         config_m = replace(CONFIG, seed=CONFIG.seed + m)
         SAMPLER = ParticleGibbs(smc=KERNEL, gibbs=GIBBS, config=config_m)
-        references_m, params_m, replacement_rates_m = SAMPLER.run(
-            scaled_dataset.data, DTs, scaled_dataset.params
+
+        references_m, params_m, replacement_rates_m, run_times_m, = SAMPLER.run(
+            scaled_dataset.data, 
+            DTs, 
+            scaled_dataset.params
         )
 
         references.append(tree_util.tree_map(np.asarray, references_m))
         params.append(tree_util.tree_map(np.asarray, params_m))
         replacement_rates.append(np.asarray(replacement_rates_m))
+        run_times.append(run_times_m[-1])
+        sampling_times.append(run_times_m[-1] - run_times_m[args.burnin])
 
     # every array has a leading chain dimension, including when M=1
     references = tree_util.tree_map(lambda *xs: np.stack(xs, axis=0), *references)
     params = tree_util.tree_map(lambda *xs: np.stack(xs, axis=0), *params)
     replacement_rates = np.stack(replacement_rates, axis=0)
-    return references, params, replacement_rates, dataset, scaled_dataset # , estimated_params
+    
+    return (references, params, replacement_rates, 
+            dataset, scaled_dataset, 
+            run_times, sampling_times)
 
 
 def _pack_object(value):
@@ -174,7 +184,9 @@ def _serialise_reference(reference_history):
 
 if __name__ == "__main__":
 
-    references, params, replacement_rates, dataset, scaled_dataset = one_experiment(EXPERIMENT_KEY)
+    (references, params, replacement_rates,
+     dataset, scaled_dataset,
+     run_times, sampling_times) = one_experiment(EXPERIMENT_KEY)
 
     # save results
     RESULTS_ROOT.mkdir(parents=True, exist_ok=True)
@@ -208,4 +220,6 @@ if __name__ == "__main__":
         standardisation_means=scaled_dataset.means,
         standardisation_scales=scaled_dataset.stds,
         config=_pack_object(asdict(CONFIG)),
+        run_seconds=run_times,
+        sampling_seconds=sampling_times
     )
