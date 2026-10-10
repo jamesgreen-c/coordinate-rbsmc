@@ -1,0 +1,16 @@
+configuration,regime,D,kernel,dataset_id,chains,max_rank_rhat
+T=100_N=31_burnin=8000_samples=2000_thin=30,Five observations per bond per day,10,CSMC,403269d61ba31b02,1,nan
+T=100_N=31_burnin=8000_samples=2000_thin=30,Five observations per bond per day,15,CSMC,b09e389b21d060cb,1,nan
+T=100_N=31_burnin=8000_samples=2000_thin=30,Five observations per bond per day,20,CSMC,cff5a08020299ac5,1,nan
+T=100_N=31_burnin=8000_samples=2000_thin=30,Five observations per bond per day,3,CSMC,55c1ef88e175c266,1,nan
+T=100_N=31_burnin=8000_samples=2000_thin=30,Five observations per bond per day,50,CSMC,ed6aae457acda53e,1,nan
+T=100_N=31_burnin=8000_samples=2000_thin=30,Five observations per bond per day,10,GUEANT,403269d61ba31b02,1,nan
+T=100_N=31_burnin=8000_samples=2000_thin=30,Five observations per bond per day,15,GUEANT,b09e389b21d060cb,1,nan
+T=100_N=31_burnin=8000_samples=2000_thin=30,Five observations per bond per day,20,GUEANT,cff5a08020299ac5,1,nan
+T=100_N=31_burnin=8000_samples=2000_thin=30,Five observations per bond per day,3,GUEANT,55c1ef88e175c266,1,nan
+T=100_N=31_burnin=8000_samples=2000_thin=30,Five observations per bond per day,50,GUEANT,ed6aae457acda53e,1,nan
+T=100_N=31_burnin=8000_samples=2000_thin=30,Five observations per bond per day,10,RB_CSMC,403269d61ba31b02,1,nan
+T=100_N=31_burnin=8000_samples=2000_thin=30,Five observations per bond per day,15,RB_CSMC,b09e389b21d060cb,1,nan
+T=100_N=31_burnin=8000_samples=2000_thin=30,Five observations per bond per day,20,RB_CSMC,cff5a08020299ac5,1,nan
+T=100_N=31_burnin=8000_samples=2000_thin=30,Five observations per bond per day,3,RB_CSMC,55c1ef88e175c266,1,nan
+T=100_N=31_burnin=8000_samples=2000_thin=30,Five observations per bond per day,50,RB_CSMC,ed6aae457acda53e,1,nan

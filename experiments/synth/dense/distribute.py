@@ -12,9 +12,10 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--i", dest="i", type=int, default=-1)
 parser.add_argument("--seed", dest="seed", type=int, default=1234)
 parser.add_argument("--N", dest="N", type=int, default=31)
-parser.add_argument("--M", dest="M", type=int, default=1)
+parser.add_argument("--M", dest="M", type=int, default=3)
 parser.add_argument("--burnin", dest="burnin", type=int, default=1000)
 parser.add_argument("--samples", dest="samples", type=int, default=500)
+parser.add_argument("--theta-repeat", type=int, default=30)
 parser.add_argument("--phi", dest="phi", type=float, default=0.1)
 parser.add_argument("--analysis", action="store_true")
 parser.add_argument("--full-inference", action="store_true")
@@ -119,6 +120,7 @@ for j in indices:
             str(SHARED_ROOT / "experiment.py"),
             "--kernel", str(kernel),
             "--M", str(args.M),
+            "--theta-repeat", str(args.theta_repeat),
             *common_args,
         ]
         run_command(command)

@@ -42,10 +42,11 @@ Important interpretation:
 * Saved replacement_rates are rolling means of aux['replaced']. This file cannot
   determine whether each kernel reports replacement of active coordinates or
   reconstructed full states. It labels the diagnostic as reported replacement.
-* experiment.py fixes its data-generation key, ignores --M, and varies the
-  sampler seed. Repeated seeds usually describe sampler variability on one data
-  set, not independently simulated data sets. Dataset fingerprints distinguish
-  these cases. Replicate bands are descriptive 10th--90th percentiles, not CIs.
+* Each file contains chains sharing one dataset. Leading axes are (chain,draw);
+  legacy single-chain files are promoted to one chain. ESS and R-hat preserve
+  chain boundaries. Posterior summaries pool chains after burn-in. Replicate
+  bands describe variation across result files/datasets, not individual chains.
+  Dataset fingerprints distinguish independently generated datasets.
 * Nonlinear posterior summaries (partial correlations) are transformed per draw.
 * True zero PCs have abs(value)<=--pc-zero-tol (default 1e-8). Sparsity of H
   itself does not imply sparse PCs: these are determined by inverse(H).
@@ -104,6 +105,8 @@ class Run:
     pcs_ess: np.ndarray
     rows: np.ndarray
     cols: np.ndarray
+    rhat: np.ndarray
+    pcs_rhat: np.ndarray
 
 
 class Analysis:
@@ -177,11 +180,15 @@ def original_H(npz):
     params = mapping(npz["params"])
     history = np.asarray(params["H"], dtype=float)
     scales = np.asarray(npz["standardisation_scales"], dtype=float).reshape(-1)
-    if history.ndim != 3 or history.shape[1:] != (len(scales), len(scales)):
-        raise ValueError(f"Expected H history (draw,D,D); got {history.shape}.")
+    if history.ndim == 3:  # legacy single-chain files
+        history = history[None, ...]
+    if history.ndim != 4 or history.shape[2:] != (len(scales), len(scales)):
+        raise ValueError(f"Expected H history (chain,draw,D,D); got {history.shape}.")
+    if history.shape[0] < 1:
+        raise ValueError("H history contains no chains.")
     if np.any(scales <= 0) or not np.all(np.isfinite(scales)):
         raise ValueError("Standardisation scales must be finite and positive.")
-    return history * scales[None, :, None] * scales[None, None, :]
+    return history * scales[None, None, :, None] * scales[None, None, None, :]
 
 
 def partial_correlations(covariances):
@@ -362,11 +369,24 @@ def estimate_ess(analysis, entries):
 
 
 def pc_history(history):
-    """Compute per-draw PCs using bounded-size batches of matrix inverses."""
+    """Compute draw-wise PCs without merging chain and iteration axes."""
     output = np.empty_like(history, dtype=float)
-    for start in range(0, len(history), 32):
-        output[start:start + 32] = partial_correlations(history[start:start + 32])
+    for chain in range(history.shape[0]):
+        for start in range(0, history.shape[1], 32):
+            output[chain, start:start + 32] = partial_correlations(history[chain, start:start + 32])
     return output
+
+
+def estimate_rhat(analysis, entries):
+    if not analysis.ess_enabled or entries.shape[0] < 2:
+        return np.full(entries.shape[-1], np.nan)
+    return local_rank_rhat(entries)
+
+
+def maximum_rhat(values):
+    # Preserve infinity for separated constant chains; count undefined entries separately.
+    defined = np.asarray(values)[~np.isnan(values)]
+    return float(np.max(defined)) if defined.size else float("nan")
 
 
 def analyse_run(path, source_label, meta, analysis):
@@ -375,10 +395,11 @@ def analyse_run(path, source_label, meta, analysis):
         config = {**{k: meta.get(k, default) for k, default in
                     (("burnin", 500), ("samples", 500), ("thin", 1))}, **config}
         H = original_H(npz)
-        coords, retained = iteration_coordinates(config, len(H))
+        coords, retained = iteration_coordinates(config, H.shape[1])
         mask = coords >= int(config["burnin"])
-        posterior = H[mask]
-        D = H.shape[1]
+        posterior = H[:, mask]
+        M, draws, D = posterior.shape[:3]
+        total_draws = M * draws
         if D != meta["D"] or not np.all(np.isfinite(H)):
             raise ValueError("Non-finite H samples or dimension mismatch.")
         np.linalg.cholesky(posterior)  # validate SPD rather than plotting invalid covariances
@@ -389,14 +410,16 @@ def analyse_run(path, source_label, meta, analysis):
         np.linalg.cholesky(truth)
         dataset = unpack(npz["dataset"])
         dataset_id = dataset_fingerprint(dataset, truth_params, npz)
-        mean = posterior.mean(axis=0)
+        mean = posterior.mean(axis=(0, 1))
         pcs_true = partial_correlations(truth)
         posterior_pcs = pc_history(posterior)
-        pcs_mean = posterior_pcs.mean(axis=0)
+        pcs_mean = posterior_pcs.mean(axis=(0, 1))
         rows, cols = np.triu_indices(D)
-        ess = estimate_ess(analysis, posterior[:, rows, cols])
-        pcs_ess = estimate_ess(analysis, posterior_pcs[:, rows, cols])
-        relative = ess / len(posterior)
+        ess = estimate_ess(analysis, posterior[:, :, rows, cols])
+        pcs_ess = estimate_ess(analysis, posterior_pcs[:, :, rows, cols])
+        rhat = estimate_rhat(analysis, posterior[:, :, rows, cols])
+        pcs_rhat = estimate_rhat(analysis, posterior_pcs[:, :, rows, cols])
+        relative = ess / total_draws
         diagonal = rows == cols
         off_diagonal = ~diagonal
         delta = mean - truth
@@ -408,7 +431,13 @@ def analyse_run(path, source_label, meta, analysis):
                 if D > 1 else float("nan"),
             "partial_correlation_mae": float(np.mean(np.abs((pcs_mean - pcs_true)[rows[off_diagonal], cols[off_diagonal]])))
                 if D > 1 else float("nan"),
-            "retained_posterior_draws": len(posterior),
+            "retained_posterior_draws": total_draws,
+            "draws_per_chain": draws,
+            "chains": M,
+            "max_rank_rhat": maximum_rhat(rhat),
+            "undefined_rhat_entries": int(np.isnan(rhat).sum()),
+            "max_pc_rank_rhat": maximum_rhat(pcs_rhat[off_diagonal]),
+            "undefined_pc_rhat_entries": int(np.isnan(pcs_rhat[off_diagonal]).sum()),
             "thin": int(config["thin"]),
             "dataset_id": dataset_id,
         }
@@ -420,7 +449,7 @@ def analyse_run(path, source_label, meta, analysis):
         pc_nonzero = off_diagonal & (np.abs(pcs_true[rows, cols]) > analysis.args.pc_zero_tol)
         pc_zero = off_diagonal & ~pc_nonzero
         for name, selector in (("nonzero", pc_nonzero), ("zero", pc_zero)):
-            median, p10 = numerical_summary(pcs_ess[selector] / len(posterior))
+            median, p10 = numerical_summary(pcs_ess[selector] / total_draws)
             metrics[f"pc_{name}_relative_ess_median"] = median
             metrics[f"pc_{name}_relative_ess_p10"] = p10
             metrics[f"pc_{name}_entries"] = int(selector.sum())
@@ -428,7 +457,9 @@ def analyse_run(path, source_label, meta, analysis):
         metrics["ess_method"] = analysis.args.ess_method
         metrics["pc_zero_tolerance"] = analysis.args.pc_zero_tol
         replacement = np.asarray(npz["replacement_rates"], dtype=float)
-        if replacement.ndim != 2 or len(replacement) != len(retained):
+        if replacement.ndim == 2:
+            replacement = replacement[None, ...]
+        if replacement.ndim != 3 or replacement.shape[:2] != (M, len(retained)):
             raise ValueError("Replacement history disagrees with saved config.")
         if not np.all(np.isfinite(replacement)) or np.any((replacement < 0) | (replacement > 1)):
             raise ValueError("Replacement rates must lie in [0,1].")
@@ -438,10 +469,10 @@ def analyse_run(path, source_label, meta, analysis):
         if not np.any(clean_mask):
             clean_mask = retained >= int(config["burnin"])
             analysis.note(f"{path.parent.name}: replacement windows overlap burn-in.")
-        metrics["replacement_rate"] = float(replacement[clean_mask].mean())
+        metrics["replacement_rate"] = float(replacement[:, clean_mask].mean())
         metrics["replacement_windows"] = int(clean_mask.sum())
-        if len(posterior) < 50:
-            analysis.note(f"{path.parent.name}: only {len(posterior)} retained posterior draws; ESS and credible bands are exploratory.")
+        if draws < 50:
+            analysis.note(f"{path.parent.name}: only {draws} retained posterior draws per chain; ESS and credible bands are exploratory.")
         if int(config["thin"]) > 1:
             analysis.note(f"Thinning={config['thin']}: ESS is based on retained draws; unthinned autocorrelation cannot be recovered.")
         horizon = float(meta["T"]) - 1.0
@@ -452,7 +483,7 @@ def analyse_run(path, source_label, meta, analysis):
                   int(config["thin"]), meta.get("full-inference", "unspecified"),
                   meta.get("phi", "unspecified"), meta.get("conditional", "unspecified"))
         return Run(path, meta, config, source_label, cohort, "", dataset_id, truth,
-                   mean, pcs_true, pcs_mean, metrics, ess, pcs_ess, rows, cols)
+                   mean, pcs_true, pcs_mean, metrics, ess, pcs_ess, rows, cols, rhat, pcs_rhat)
 
 
 def assign_regimes(runs):
@@ -654,7 +685,7 @@ def load_path_data(run, analysis):
         if not 0 <= bond < true_eta.shape[1]:
             raise ValueError(f"--bond={bond} out of range for D={true_eta.shape[1]} (zero-based).")
         params = mapping(npz["params"])
-        coords, _ = iteration_coordinates(run.config, np.asarray(params["H"]).shape[0])
+        coords, _ = iteration_coordinates(run.config, original_H(npz).shape[1])
         if "references" in npz.files:
             reference = mapping(npz["references"])
             trajectories = reference["trajectory"]
@@ -664,10 +695,15 @@ def load_path_data(run, analysis):
             raise ValueError("No saved reference trajectories.")
         eta = np.asarray(trajectories[1])
         expected = len(coords) if run.config.get("saved_paths") is None else min(int(run.config["saved_paths"]), len(coords))
-        if eta.ndim != 3 or eta.shape != (expected, *true_eta.shape):
-            raise ValueError(f"Unexpected rolling trajectory shape {eta.shape}; expected {(expected, *true_eta.shape)}.")
-        reference_iterations = coords[-len(eta):]
-        eta = eta[reference_iterations >= int(run.config["burnin"]), :, bond]
+        if eta.ndim == 3:
+            eta = eta[None, ...]
+        M = run.metrics["chains"]
+        expected_shape = (M, expected, *true_eta.shape)
+        if eta.ndim != 4 or eta.shape != expected_shape:
+            raise ValueError(f"Unexpected rolling trajectory shape {eta.shape}; expected {expected_shape}.")
+        reference_iterations = coords[-eta.shape[1]:]
+        eta = eta[:, reference_iterations >= int(run.config["burnin"]), :, bond]
+        eta = eta.reshape(-1, true_eta.shape[0])
         if len(eta) == 0:
             raise ValueError("No post-burn-in reference paths.")
         means = np.asarray(npz["standardisation_means"])
@@ -791,23 +827,32 @@ def plot_selected_traces(runs, analysis, directory, suffix):
         run = lookup[kernel]
         with np.load(run.path, allow_pickle=True) as npz:
             H = original_H(npz)
-        coords, _ = iteration_coordinates(run.config, len(H))
+        coords, _ = iteration_coordinates(run.config, H.shape[1])
         pcs = pc_history(H) if pairs else None
-        series = [H[:, 0, 0]] + [pcs[:, i, j] for i, j in pairs]
+        series = [H[:, :, 0, 0]] + [pcs[:, :, i, j] for i, j in pairs]
         post = coords >= int(run.config["burnin"])
         for row, (values, label, target) in enumerate(zip(series, titles, truth)):
             ax = axes[row, col]
-            ax.plot(coords, values, color=COLOURS[kernel], linewidth=0.9)
+            for chain, chain_values in enumerate(values):
+                ax.plot(coords, chain_values, color=COLOURS[kernel], linewidth=0.9,
+                        alpha=0.7, linestyle=("-", "--", ":", "-.")[chain % 4],
+                        label=f"Chain {chain + 1}")
+            if row == 0 and len(values) > 1:
+                ax.legend(fontsize=6)
             ax.axvline(int(run.config["burnin"]), color="0.4", linestyle=":", linewidth=1)
             ax.axhline(target, color="black", linestyle="--", linewidth=0.8)
             ax.set_xlabel("Gibbs iteration")
             ax.set_ylabel(label)
             ax.grid(alpha=0.18)
-            kept = values[post]
-            max_lag = min(analysis.args.acf_lags, max(0, len(kept) // 2))
-            acf_axes[0, row].plot(np.arange(max_lag + 1) * int(run.config["thin"]),
-                                  autocorrelation(kept, max_lag), color=COLOURS[kernel],
-                                  marker="o", markersize=2.5, label=LABELS[kernel])
+            kept = values[:, post]
+            max_lag = min(analysis.args.acf_lags, max(0, kept.shape[1] // 2))
+            for chain, chain_values in enumerate(kept):
+                acf_axes[0, row].plot(
+                    np.arange(max_lag + 1) * int(run.config["thin"]),
+                    autocorrelation(chain_values, max_lag), color=COLOURS[kernel],
+                    linestyle=("-", "--", ":", "-.")[chain % 4], alpha=0.7,
+                    label=f"{LABELS[kernel]}, chain {chain + 1}",
+                )
     for ax, title in zip(acf_axes[0], titles):
         ax.set_title(title, fontsize=10)
         ax.set_xlabel("Lag (Gibbs iterations; retained samples)")
@@ -816,7 +861,7 @@ def plot_selected_traces(runs, analysis, directory, suffix):
         ax.grid(alpha=0.18)
     acf_axes[0, 0].legend(fontsize=8)
     fig.suptitle("Selected traces: weak/medium/strong true dependencies and a true-zero pair")
-    acf_fig.suptitle("Covariance/dependence mixing after burn-in")
+    acf_fig.suptitle("Within-chain autocorrelation after burn-in")
     analysis.save(fig, directory, f"selected_traces_{suffix}")
     analysis.save(acf_fig, directory, f"selected_ACF_{suffix}")
     plot_pc_trace_collections(runs, analysis, directory, suffix)
@@ -858,9 +903,9 @@ def plot_pc_trace_collections(runs, analysis, directory, suffix):
     for run in runs:
         with np.load(run.path, allow_pickle=True) as npz:
             H = original_H(npz)
-        coords, _ = iteration_coordinates(run.config, len(H))
+        coords, _ = iteration_coordinates(run.config, H.shape[1])
         pcs = pc_history(H)
-        history[run.meta["kernel"]] = (run, coords, pcs[:, run.rows, run.cols],
+        history[run.meta["kernel"]] = (run, coords, pcs[:, :, run.rows, run.cols],
                                       {(int(i), int(j)): k for k, (i, j) in enumerate(zip(run.rows, run.cols))})
     selection_rows = []
     directory.mkdir(parents=True, exist_ok=True)
@@ -885,7 +930,13 @@ def plot_pc_trace_collections(runs, analysis, directory, suffix):
                     for row, pair in enumerate(selected):
                         i, j = pair
                         ax = axes[row, col]
-                        ax.plot(coords, entries[:, index[pair]], color=COLOURS[kernel], linewidth=0.8)
+                        for chain in range(entries.shape[0]):
+                            ax.plot(coords, entries[chain, :, index[pair]],
+                                    color=COLOURS[kernel], linewidth=0.8, alpha=0.7,
+                                    linestyle=("-", "--", ":", "-.")[chain % 4],
+                                    label=f"Chain {chain + 1}")
+                        if row == 0 and entries.shape[0] > 1:
+                            ax.legend(fontsize=6, loc="lower right")
                         ax.axvline(int(run.config["burnin"]), color="0.4", linestyle=":", linewidth=0.8)
                         ax.axhline(true_pcs[pair], color="black", linestyle="--", linewidth=0.8)
                         ax.set_ylabel(f"PC [{i + 1},{j + 1}]\ntrue={true_pcs[pair]:.3g}")
@@ -917,7 +968,7 @@ def plot_pc_trace_collections(runs, analysis, directory, suffix):
 
 
 def grouped_rhat(runs, analysis):
-    """Multi-chain check only for files with identical observed data and budget."""
+    """Cross-chain diagnostics; only combine files with identical data/targets."""
     if not analysis.ess_enabled:
         return []
     groups = defaultdict(list)
@@ -926,34 +977,41 @@ def grouped_rhat(runs, analysis):
     output = []
     for group in groups.values():
         first = group[0]
-        row = {"configuration": cohort_name(first.cohort), "regime": first.regime,
-               "D": first.meta["D"], "kernel": first.meta["kernel"],
-               "dataset_id": first.dataset_id, "chains": len(group)}
-        if len(group) == 1:
-            row["max_rank_rhat"] = float("nan")
-            output.append(row)
-            continue
-        seeds = [r.meta["seed"] for r in group]
-        if len(set(seeds)) != len(seeds):
-            analysis.note(f"{row}: repeated sampler seeds; multi-chain R-hat skipped.")
-            row["max_rank_rhat"] = float("nan")
-            output.append(row)
-            continue
-        chains = []
+        chains, identities = [], []
         for run in group:
             with np.load(run.path, allow_pickle=True) as npz:
                 H = original_H(npz)
-            coords, _ = iteration_coordinates(run.config, len(H))
-            chains.append(H[coords >= int(run.config["burnin"])][:, first.rows, first.cols])
-        draws = min(len(c) for c in chains)
-        stacked = np.stack([c[:draws] for c in chains])
-        if draws < 8:
+                if "chain_seeds" in npz.files:
+                    seeds = np.asarray(npz["chain_seeds"]).reshape(-1).tolist()
+                else:
+                    base = int(run.config.get("seed", run.meta["seed"]))
+                    seeds = [base + m for m in range(H.shape[0])]
+            if len(seeds) != H.shape[0]:
+                raise ValueError("chain_seeds length disagrees with H chain dimension.")
+            identities.extend(seeds)
+            coords, _ = iteration_coordinates(run.config, H.shape[1])
+            entries = H[:, coords >= int(run.config["burnin"])][:, :, first.rows, first.cols]
+            chains.extend(entries)
+        row = {"configuration": cohort_name(first.cohort), "regime": first.regime,
+               "D": first.meta["D"], "kernel": first.meta["kernel"],
+               "dataset_id": first.dataset_id, "chains": len(chains)}
+        if len(set(identities)) != len(identities):
+            analysis.note(f"{row}: repeated sampler seeds; grouped R-hat skipped.")
+            row["max_rank_rhat"] = float("nan")
+        elif len(chains) < 2:
             row["max_rank_rhat"] = float("nan")
         else:
+            draws = min(len(c) for c in chains)
+            stacked = np.stack([c[:draws] for c in chains])
             rhat = local_rank_rhat(stacked)
-            row["max_rank_rhat"] = float(np.max(rhat)) if np.all(np.isfinite(rhat)) else float("nan")
-            row["nonfinite_rhat_entries"] = int((~np.isfinite(rhat)).sum())
-            if row["nonfinite_rhat_entries"] or row["max_rank_rhat"] > 1.01:
+            ess = local_ess(stacked, method=analysis.args.ess_method)
+            row["draws_per_chain"] = draws
+            row["max_rank_rhat"] = maximum_rhat(rhat)
+            row["undefined_rhat_entries"] = int(np.isnan(rhat).sum())
+            row["infinite_rhat_entries"] = int(np.isinf(rhat).sum())
+            row["median_ess"] = numerical_summary(ess)[0]
+            row["median_relative_ess"] = numerical_summary(ess / (len(chains) * draws))[0]
+            if row["undefined_rhat_entries"] or row["max_rank_rhat"] > 1.01:
                 analysis.note(f"{first.meta['kernel']}, D={first.meta['D']}, {first.regime}: chains do not establish convergence (max R-hat={row['max_rank_rhat']:.3g}).")
         output.append(row)
     return output
@@ -1092,19 +1150,23 @@ def main(argv=None):
         {"path": str(r.path), "regime": r.regime, "kernel": r.meta["kernel"],
          "D": r.meta["D"], "seed": r.meta["seed"], "i": int(i), "j": int(j),
          "ess": float(ess), "ess_method": args.ess_method,
+         "chains": r.metrics["chains"], "draws_per_chain": r.metrics["draws_per_chain"],
          "bulk_ess": float(ess) if args.ess_method == "bulk" else float("nan"),
+         "rank_rhat": float(r.rhat[k]),
          "relative_ess": float(ess / r.metrics["retained_posterior_draws"]),
          "thin": r.config["thin"]}
-        for r in runs for i, j, ess in zip(r.rows, r.cols, r.ess)))
+        for r in runs for k, (i, j, ess) in enumerate(zip(r.rows, r.cols, r.ess))))
     write_csv(args.plot_dir / "partial_correlation_ESS.csv", (
         {"path": str(r.path), "regime": r.regime, "kernel": r.meta["kernel"],
          "D": r.meta["D"], "seed": r.meta["seed"], "i": int(i), "j": int(j),
          "true_pc": float(r.pcs_truth[i, j]),
+         "rank_rhat": float(r.pcs_rhat[k]),
          "true_nonzero": bool(abs(r.pcs_truth[i, j]) > args.pc_zero_tol),
          "ess": float(ess), "ess_method": args.ess_method,
+         "chains": r.metrics["chains"], "draws_per_chain": r.metrics["draws_per_chain"],
          "relative_ess": float(ess / r.metrics["retained_posterior_draws"]),
          "thin": r.config["thin"]}
-        for r in runs for i, j, ess in zip(r.rows, r.cols, r.pcs_ess) if i != j))
+        for r in runs for k, (i, j, ess) in enumerate(zip(r.rows, r.cols, r.pcs_ess)) if i != j))
     write_csv(args.plot_dir / "chain_diagnostics.csv", chain_rows)
     write_csv(args.plot_dir / "skipped_results.csv", skipped)
     manifest = {"arguments": {k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()},

@@ -1,0 +1,63 @@
+Compare saved corporate-bond particle Gibbs experiments.
+
+Run from the SAME repository/environment as experiment.py: dataset objects in
+the NPZ files need their original Python classes (and JAX) to be unpickled.
+This script does not regenerate data or rerun inference.
+
+Examples (place this file beside distribute.py, or supply --root):
+    python analysis_compare.py --root experiments/synth/low_frequency
+    python analysis_compare.py --root experiments/synth \
+        --results-dir low=experiments/synth/low_frequency/results \
+        --results-dir high=experiments/synth/high_frequency/results
+    python analysis_compare.py --root experiments/synth --dims 3 10 15 20 50 \
+        --N 31 --samples 500 --burnin 1000 --plot-D 20 --bond 0
+
+Dependencies: numpy, matplotlib, and scipy for rank-normalised diagnostics.
+ESS and R-hat are implemented locally; no Bayesian analysis package is needed.
+Use --no-ess to omit ESS/R-hat, or --ess-method mean for raw split-chain ESS.
+
+Output defaults to ROOT/plots. Each matched inference configuration gets its
+own subdirectory containing:
+    H_error_by_D.{png,pdf}            relative Frobenius error and entrywise MAE
+    replacement_and_ESS_by_D.*        replacement plus diagonal/off-diagonal ESS
+    eta_paths_D=20_seed=1234.*        one aligned panel per available method
+    H_heatmaps_D=20_seed=1234.*        truth and posterior mean covariance
+    partial_correlations_D=20_seed=1234.*   draw-wise posterior means
+    selected_traces_D=20_seed=1234.*  variance; weak/medium/strong nonzero PCs and a zero PC
+    selected_ACF_D=20_seed=1234.*     lags in original Gibbs iterations
+    nonzero_pc_traces_*.pdf          multipage traces of EVERY truly nonzero PC
+    zero_pc_traces_*.pdf             reproducibly selected truly zero PCs
+    worst_mixing_pc_traces_*.pdf     union of worst-mixing PCs across methods
+    *_page=NNN.{png,svg}             trace pages in requested image formats
+    partial_correlation_ESS_by_D.*   separate summaries for zero/nonzero PCs
+CSV tables, a JSON manifest, and analysis_notes.txt are saved in ROOT/plots.
+
+Important interpretation:
+* H is transformed back with diag(scales) @ H @ diag(scales).
+* Initialisation is excluded; burn-in uses the saved config, not array offsets.
+* Reference paths are chronological, but only the latest saved_paths survive.
+* ESS is for retained draws. ESS/draw cannot recover unthinned efficiency.
+* Runtime is not saved by the supplied experiment.py; ESS/second is unavailable.
+* Saved replacement_rates are rolling means of aux['replaced']. This file cannot
+  determine whether each kernel reports replacement of active coordinates or
+  reconstructed full states. It labels the diagnostic as reported replacement.
+* experiment.py fixes its data-generation key, ignores --M, and varies the
+  sampler seed. Repeated seeds usually describe sampler variability on one data
+  set, not independently simulated data sets. Dataset fingerprints distinguish
+  these cases. Replicate bands are descriptive 10th--90th percentiles, not CIs.
+* Nonlinear posterior summaries (partial correlations) are transformed per draw.
+* True zero PCs have abs(value)<=--pc-zero-tol (default 1e-8). Sparsity of H
+  itself does not imply sparse PCs: these are determined by inverse(H).
+* Local bulk ESS uses split chains, pooled rank normalisation, FFT covariance,
+  and Geyer's initial positive/monotone paired autocorrelation sequence. Mean
+  ESS uses the same calculation on raw split chains. Odd-length chains lose
+  their middle draw when split. Rank R-hat also includes the folded diagnostic.
+* Stuck/nonfinite entries have NaN ESS and are counted in exported diagnostics.
+* No new observation-frequency regime or augmentation experiment is fabricated.
+
+
+Run notes:
+Thinning=30: ESS is based on retained draws; unthinned autocorrelation cannot be recovered.
+No runtime is saved: ESS/second cannot be calculated from these files.
+Replacement rates use the saved rolling aux['replaced'] diagnostic; active-coordinate semantics cannot be verified from these attachments.
+Current filenames do not encode phi/full-inference, and config does not save them; keep different model/prior settings in separate result roots.

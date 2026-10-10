@@ -31,6 +31,7 @@ parser.add_argument("--N", dest="N", type=int, default=31)  # total number of pa
 parser.add_argument("--T", dest="T", type=int, default=500)
 parser.add_argument("--D", dest="D", type=int, default=1)
 parser.add_argument("--steps", type=int, default=499)
+parser.add_argument("--theta-repeat", type=int, default=10)
 parser.add_argument("--kernel", type=int, default=1)
 parser.add_argument("--burnin", type=int, default=500)
 parser.add_argument("--samples", dest="samples", type=int, default=500)
@@ -52,10 +53,8 @@ parser.add_argument("--backward", action='store_true')
 parser.add_argument('--no-backward', dest='backward', action='store_false')
 parser.set_defaults(backward=True)
 
-parser.add_argument("--debug", action='store_true')
-parser.add_argument('--no-debug', dest='debug', action='store_false')
-parser.set_defaults(debug=False)
-
+parser.add_argument("--debug", action='store_true', default=False)
+parser.add_argument("--benchmark", action='store_true', default=False)
 parser.add_argument("--root", type=Path, default=Path.cwd())
 
 args = parser.parse_args()
@@ -98,9 +97,11 @@ KERNEL = SMC(
 CONFIG = Config(
     samples=args.samples,
     burnin=args.burnin,
+    theta_steps=args.theta_repeat,
     seed=args.seed,
     thin=args.thin,
     saved_paths=args.saved_paths,
+    benchmark=args.benchmark
 )
 
 print(f"""
@@ -124,12 +125,6 @@ def one_experiment(key: PRNGKey):
     # generate one dataset shared by all chains
     key, data_key = jr.split(key)
     dataset = get_data(key=data_key, dim=args.D, dts=DTs, params=MODEL_PARAMS)
-
-    # estimated_params = {}
-    # if not args.full_inference:
-    #     estimated_params = estimate_params_from_data(dataset=dataset)
-    # dataset.params = {**dataset.params, **estimated_params}
-
     scaled_dataset = dataset.standardised_data
 
     # gibbs config
@@ -212,11 +207,9 @@ if __name__ == "__main__":
         DATAPATH,
         references=_pack_object(_serialise_reference(references)),
         params=params,
-        # energies=energies,
         replacement_rates=replacement_rates,
         dataset=dataset,
         true_params=MODEL_PARAMS,
-        # estimated_params=estimated_params,
         standardisation_means=scaled_dataset.means,
         standardisation_scales=scaled_dataset.stds,
         config=_pack_object(asdict(CONFIG)),
