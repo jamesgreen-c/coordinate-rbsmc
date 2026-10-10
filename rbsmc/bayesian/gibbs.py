@@ -100,7 +100,7 @@ class Gibbs:
             repeat: int = 1
         ):
         """ Run a set of sequential gibbs samples """
-        
+
         def sweep(current_params, sweep_key):
             keys = jr.split(sweep_key, len(self.blocks))
             for block_key, block in zip(keys, self.blocks):
@@ -113,7 +113,7 @@ class Gibbs:
                 current_params = {**current_params, **block.sample(block_key, context)}
             return current_params, None
 
-        keys = jr.split(key, len(repeat))
+        keys = jr.split(key, repeat)
         updated_params, _ = jax.lax.scan(sweep, params, keys)
         return updated_params
 

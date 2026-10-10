@@ -263,7 +263,7 @@ class ParticleGibbs:
         """measure warmed CSMC and single parameter-sweep costs in seconds."""
         
         sample = jax.jit(self.smc.sample)
-        update = jax.jit(lambda k, p, x, dt, y: self.gibbs.update(k, p, x, dt, y, 1))
+        update = jax.jit(lambda k, p, x, dt, y: self.gibbs.update(k, p, x, dt, y, self.config.theta_steps))
 
         jax.block_until_ready((params, state, dts, data))
         timings = []
