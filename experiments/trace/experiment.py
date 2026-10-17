@@ -34,6 +34,7 @@ parser.add_argument("--burnin", type=int, default=500)
 parser.add_argument("--samples", dest="samples", type=int, default=500)
 parser.add_argument("--thin", type=int, default=1)
 parser.add_argument("--saved-paths", type=int, default=None)
+parser.add_argument("--theta-repeat", type=int, default=10)
 
 parser.add_argument("--seed", dest="seed", type=int, default=1234)
 
@@ -72,6 +73,7 @@ KERNEL = SMC(fk=kernel, conditional=True, kwargs=kwargs)
 CONFIG = Config(
     samples=args.samples,
     burnin=args.burnin,
+    theta_steps=args.theta_repeat,
     seed=args.seed,
     thin=args.thin,
     saved_paths=args.saved_paths,
