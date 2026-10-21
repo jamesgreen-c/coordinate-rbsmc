@@ -139,6 +139,13 @@ class ParticleGibbs:
             energy, self.params, state, aux = train_step(subkey, self.params, state, dts, data)
             jax.block_until_ready((self.params, state))
 
+            # early stop under NaNs
+            for name, value in self.params.items():
+                if np.isnan(np.asarray(value)).any():
+                    message = f"NaN detected in parameter '{name}' at iteration {itr + 1}; stopping."
+                    pbar.write(message)
+                    raise FloatingPointError(message)
+
             # tracking
             energy_float = float(energy)
             self.energies[itr] = energy_float
