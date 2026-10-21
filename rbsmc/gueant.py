@@ -242,10 +242,10 @@ def predictive_obs_logpdf(
     # case based evaluation
     case_0 = lambda: norm.logpdf(obs_value + half_spread, loc=eta_prev_i, scale=std_tilde)
     case_1 = lambda: norm.logpdf(obs_value - half_spread, loc=eta_prev_i, scale=std_tilde)
-    case_2 = lambda: norm.logcdf(eta_prev_i - (obs_value + half_spread), loc=0.0, scale=std_tilde)
-    case_3 = lambda: norm.logcdf((obs_value - half_spread) - eta_prev_i, loc=0.0, scale=std_tilde)
+    # case_2 = lambda: norm.logcdf(eta_prev_i - (obs_value + half_spread), loc=0.0, scale=std_tilde)
+    # case_3 = lambda: norm.logcdf((obs_value - half_spread) - eta_prev_i, loc=0.0, scale=std_tilde)
 
-    def case_4():
+    def case_2():
         log_hi = norm.logcdf((obs_value + alpha_i) - eta_prev_i, loc=0.0, scale=std_tilde)
         log_lo = norm.logcdf((obs_value - alpha_i) - eta_prev_i, loc=0.0, scale=std_tilde)
         val = _logdiffexp(log_hi, log_lo)
@@ -253,7 +253,7 @@ def predictive_obs_logpdf(
         tiny = jnp.log(jnp.finfo(val.dtype).tiny)
         return jnp.nan_to_num(val, nan=tiny, neginf=tiny)
 
-    return jax.lax.switch(event_type, [case_0, case_1, case_2, case_3, case_4])
+    return jax.lax.switch(event_type, [case_0, case_1, case_2]) # , case_3, case_4])
 
 
 def mid_price_proposal(
@@ -302,38 +302,25 @@ def mid_price_proposal(
     half_spread = psi[bond_idx] * jnp.exp(z[:, bond_idx])
 
     standardise = lambda x: (x - eta_prev_i) / std_tilde
-    # eta_i_tilde = eta_i + eps_i
 
     case_0 = lambda: obs_value + half_spread
     case_1 = lambda: obs_value - half_spread
-    # case_2 = lambda: eta_prev_i + std_tilde * jr.truncated_normal(
+    # case_2 = lambda: eta_prev_i + std_tilde * lower_truncated_normal(
     #     key_tilde,
-    #     lower=jnp.minimum(standardise(obs_value + half_spread), TRUNC_BOUND),
-    #     upper=jnp.inf,
-    #     shape=(N,),
+    #     standardise(obs_value + half_spread),
     # )
-    # case_3 = lambda: eta_prev_i + std_tilde * jr.truncated_normal(
+    # case_3 = lambda: eta_prev_i - std_tilde * lower_truncated_normal(
     #     key_tilde,
-    #     lower=-jnp.inf,
-    #     upper=jnp.maximum(standardise(obs_value - half_spread), -TRUNC_BOUND),
-    #     shape=(N,),
+    #     -standardise(obs_value - half_spread),
     # )
-    case_2 = lambda: eta_prev_i + std_tilde * lower_truncated_normal(
-        key_tilde,
-        standardise(obs_value + half_spread),
-    )
-    case_3 = lambda: eta_prev_i - std_tilde * lower_truncated_normal(
-        key_tilde,
-        -standardise(obs_value - half_spread),
-    )
-    case_4 = lambda: eta_prev_i + std_tilde * jr.truncated_normal(
+    case_2 = lambda: eta_prev_i + std_tilde * jr.truncated_normal(
         key_tilde,
         lower=standardise(obs_value - alpha_i),
         upper=standardise(obs_value + alpha_i),
         shape=(N,),
     )
 
-    eta_i_tilde = jax.lax.switch(event_type, [case_0, case_1, case_2, case_3, case_4])
+    eta_i_tilde = jax.lax.switch(event_type, [case_0, case_1, case_2]) # , case_3, case_4])
 
     # eta_i | eta_i + eps_i, eta_{i,t-1}
     mean_i = (var_i * dt * eta_i_tilde + var_eps * eta_prev_i) / var_tilde
