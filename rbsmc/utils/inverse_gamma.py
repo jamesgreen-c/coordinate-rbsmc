@@ -3,6 +3,20 @@ import jax.random as jr
 from jax.scipy.special import gammaln
 
 
+# def inverse_gamma(key, concentration, scale):
+#     """
+#     Sample InvGamma(concentration, scale), with density
+
+#         p(x) ∝ x^(-concentration - 1) exp(-scale / x).
+#     """
+#     dtype = jnp.result_type(concentration, scale, jnp.float64)
+#     concentration = jnp.asarray(concentration, dtype=dtype)
+#     scale = jnp.asarray(scale, dtype=dtype)
+
+#     gamma_draw = jr.gamma(key, concentration, dtype=dtype)
+
+#     return scale / gamma_draw
+
 def inverse_gamma(key, concentration, scale):
     """
     Sample InvGamma(concentration, scale), with density
@@ -13,6 +27,7 @@ def inverse_gamma(key, concentration, scale):
     concentration = jnp.asarray(concentration, dtype=dtype)
     scale = jnp.asarray(scale, dtype=dtype)
 
+    concentration, scale = jnp.broadcast_arrays(concentration, scale)
     gamma_draw = jr.gamma(key, concentration, dtype=dtype)
 
     return scale / gamma_draw
