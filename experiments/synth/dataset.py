@@ -2,8 +2,6 @@ import jax.numpy as jnp
 import numpy as np
 
 from jax import Array
-from scipy.optimize import minimize
-from scipy.linalg import solve_continuous_lyapunov
 
 from rbsmc.utils.dataset import Dataset
 

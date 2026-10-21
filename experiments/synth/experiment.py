@@ -31,7 +31,7 @@ parser.add_argument("--N", dest="N", type=int, default=31)  # total number of pa
 parser.add_argument("--T", dest="T", type=int, default=500)
 parser.add_argument("--D", dest="D", type=int, default=1)
 parser.add_argument("--steps", type=int, default=499)
-parser.add_argument("--theta-repeat", type=int, default=10)
+parser.add_argument("--theta-repeat", type=int, default=5)
 parser.add_argument("--kernel", type=int, default=1)
 parser.add_argument("--burnin", type=int, default=500)
 parser.add_argument("--samples", dest="samples", type=int, default=500)

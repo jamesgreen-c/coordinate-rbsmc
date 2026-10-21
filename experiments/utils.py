@@ -25,7 +25,8 @@ def ou_diag_transition(A, Q, dt):
     a_sum = A_diag[:, None] + A_diag[None, :]
     factor = jnp.where(
         jnp.abs(a_sum) > 1e-10,
-        (1.0 - jnp.exp(-a_sum * dt)) / a_sum,
+        -jnp.expm1(-a_sum * dt) / a_sum,
+        # (1.0 - jnp.exp(-a_sum * dt)) / a_sum,
         dt,
     )
 

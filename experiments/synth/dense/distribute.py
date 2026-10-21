@@ -15,7 +15,7 @@ parser.add_argument("--N", dest="N", type=int, default=31)
 parser.add_argument("--M", dest="M", type=int, default=3)
 parser.add_argument("--burnin", dest="burnin", type=int, default=1000)
 parser.add_argument("--samples", dest="samples", type=int, default=500)
-parser.add_argument("--theta-repeat", type=int, default=30)
+parser.add_argument("--theta-repeat", type=int, default=5)
 parser.add_argument("--phi", dest="phi", type=float, default=0.1)
 parser.add_argument("--analysis", action="store_true")
 parser.add_argument("--full-inference", action="store_true")
@@ -85,7 +85,7 @@ indices = range(len(combination)) if args.i == -1 else [args.i]
 
 for j in indices:
     D, T, kernel = combination[j]
-    steps = (T - 1) # * D * 5  # roughly 5 observations per bond per day
+    steps = (T - 1) * D * 5  # roughly 5 observations per bond per day
     thin, saved_paths = retention_config(D)
 
     inference_flag = "--full-inference" if args.full_inference else "--no-full-inference"
