@@ -386,6 +386,20 @@ for name, history in parameter_histories.items():
     )
     plot_posterior_summary(name, history, truth, posterior_parameter_mask, plotpath)
 
+    if name == "H":
+        pc_history = get_pcs(np.linalg.inv(history))
+        pc_truth = get_pcs(np.linalg.inv(truth)) if truth is not None else None
+        plot_traces(
+            "pc",
+            pc_history,
+            parameter_iterations,
+            plotpath,
+            burnin,
+            thin,
+            pc_truth,
+            lower_triangle=True,
+        )
+
     if name in ("H", "H0") and truth is not None:
         plot_covariance_diagnostics(name, history, truth, posterior_parameter_mask, plotpath)
 

@@ -30,7 +30,7 @@ def kernel(
         Gamma_t: Union[Callable, tuple[Callable, Any]],
         chol_Q_eta: Array,
         chol_R: Array,
-        alpha: Array,
+        # alpha: Array,
         psi: Array,
         resampling_func: Callable,
         ancestor_move_func: Callable,
@@ -126,7 +126,7 @@ def kernel(
         # Step 2: compute auxiliary/predictive weights before drawing eta_t
         _, _, dt, obs_t = M_t_params
         _, eta_t_m_1 = x_t_m_1
-        log_pred_t = predictive_obs_logpdf(z_t_hat, eta_t_m_1, obs_t, alpha, psi, chol_Q_eta, chol_R, dt)
+        log_pred_t = predictive_obs_logpdf(z_t_hat, eta_t_m_1, obs_t, psi, chol_Q_eta, chol_R, dt)
         log_aux_w_t = normalize(log_w_t_m_1 + log_pred_t, log_space=True)
         w_aux_t = jnp.exp(log_aux_w_t)
 
@@ -140,7 +140,7 @@ def kernel(
 
         # Step 4-6: draw eta_t from the conditional guided proposal
         eta_t_m_1 = x_t_m_1[1]
-        eta_t = mid_price_proposal(key_eta_t, z_t, eta_t_m_1, obs_t, alpha, psi, chol_Q_eta, chol_R, dt)
+        eta_t = mid_price_proposal(key_eta_t, z_t, eta_t_m_1, obs_t, psi, chol_Q_eta, chol_R, dt)
         x_t = (z_t, eta_t)
 
         if conditional:
@@ -210,7 +210,7 @@ def predictive_obs_logpdf(
         z_t: Array,
         eta_t_m_1: Array,
         obs_t: tuple[Array],
-        alpha: Array,
+        # alpha: Array,
         psi: Array,
         chol_Q_eta: Array,
         chol_R: Array,
@@ -236,7 +236,7 @@ def predictive_obs_logpdf(
 
     # extraction
     eta_prev_i = eta_t_m_1[:, bond_idx]
-    alpha_i = alpha[bond_idx]
+    # alpha_i = alpha[bond_idx]
     half_spread = psi[bond_idx] * jnp.exp(z_t[:, bond_idx])
 
     # case based evaluation
@@ -246,12 +246,17 @@ def predictive_obs_logpdf(
     # case_3 = lambda: norm.logcdf((obs_value - half_spread) - eta_prev_i, loc=0.0, scale=std_tilde)
 
     def case_2():
-        log_hi = norm.logcdf((obs_value + alpha_i) - eta_prev_i, loc=0.0, scale=std_tilde)
-        log_lo = norm.logcdf((obs_value - alpha_i) - eta_prev_i, loc=0.0, scale=std_tilde)
-        val = _logdiffexp(log_hi, log_lo)
+        # log_hi = norm.logcdf((obs_value + half_spread) - eta_prev_i, loc=0.0, scale=std_tilde)  # old: (.. + alpha_i) ...
+        # log_lo = norm.logcdf((obs_value - half_spread) - eta_prev_i, loc=0.0, scale=std_tilde)  # old: (.. - alpha_i) ...
+        lo = obs_value - eta_prev_i - half_spread # alpha_i
+        hi = obs_value - eta_prev_i + half_spread # alpha_i
+        reflect = lo > 0
+        log_hi = norm.logcdf(jnp.where(reflect, -lo, hi), scale=std_tilde)
+        log_lo = norm.logcdf(jnp.where(reflect, -hi, lo), scale=std_tilde)
+        val = _logdiffexp(log_hi, log_lo) - jnp.log(2 * half_spread)
 
         tiny = jnp.log(jnp.finfo(val.dtype).tiny)
-        return jnp.nan_to_num(val, nan=tiny, neginf=tiny)
+        return jnp.maximum(val, tiny)
 
     return jax.lax.switch(event_type, [case_0, case_1, case_2]) # , case_3, case_4])
 
@@ -261,7 +266,7 @@ def mid_price_proposal(
         z: Array,
         eta_prev: Array,
         obs: tuple[Array],
-        alpha: Array,
+        # alpha: Array,
         psi: Array,
         chol_Q_eta: Array,
         chol_R: Array,
@@ -298,7 +303,7 @@ def mid_price_proposal(
 
     # extraction
     eta_prev_i = eta_prev[:, bond_idx]
-    alpha_i = alpha[bond_idx]
+    # alpha_i = alpha[bond_idx]
     half_spread = psi[bond_idx] * jnp.exp(z[:, bond_idx])
 
     standardise = lambda x: (x - eta_prev_i) / std_tilde
@@ -315,8 +320,8 @@ def mid_price_proposal(
     # )
     case_2 = lambda: eta_prev_i + std_tilde * jr.truncated_normal(
         key_tilde,
-        lower=standardise(obs_value - alpha_i),
-        upper=standardise(obs_value + alpha_i),
+        lower=standardise(obs_value - half_spread), # alpha_i),
+        upper=standardise(obs_value + half_spread), # alpha_i),
         shape=(N,),
     )
 

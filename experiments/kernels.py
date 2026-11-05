@@ -403,7 +403,7 @@ class GueantCSMC(FeynmanKac):
         Q = params["Q"]
         R = params["R"]
         H = params["H"]
-        alpha = params["alpha"]
+        # alpha = params["alpha"]
         psi = params["psi"]
 
         chol_R = jnp.linalg.cholesky(R)
@@ -425,7 +425,7 @@ class GueantCSMC(FeynmanKac):
             key, state,
             M_0, Gamma_0,
             inps, Gamma_t_plus_params,
-            chol_H, chol_R, alpha, psi,
+            chol_H, chol_R, psi, # alpha, psi,
             N=self.N, conditional=conditional,
             **kwargs
         )

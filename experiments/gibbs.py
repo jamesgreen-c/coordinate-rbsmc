@@ -11,6 +11,8 @@ from rbsmc.bayesian.gibbs import ConjugateBlock, ConditionalBlock, GibbsContext
 from rbsmc.dists import GaussianNatParam, InverseGammaNatParam
 from rbsmc.bayesian.metropolis import RandomWalkMetropolis
 
+from experiments.prior import log_ht
+
 ##########################
 #     horseshoe prior    #
 ##########################
@@ -31,21 +33,21 @@ def make_blocks(D: int, full_inference: bool = False):
         m0_block = _construct_m0_block(D)
         H0_block = _construct_H0_block(D)
         A_block = _construct_A_block(D)
-        R_block = _construct_R_block(D)
+        # R_block = _construct_R_block(D)
         Q0_block = _construct_Q0_block(D)
         Q_block = _construct_Q_block(D)
         PSI_block = _construct_PSI_block(D)
-        ALPHA_block = _construct_ALPHA_block(D)
+        # ALPHA_block = _construct_ALPHA_block(D)
 
         blocks.extend([
             m0_block, 
             H0_block, 
-            R_block, 
+            # R_block, 
             A_block, 
             Q_block, 
             Q0_block, 
             PSI_block, 
-            ALPHA_block
+            # ALPHA_block
         ])
     
     return blocks
@@ -324,37 +326,43 @@ def _construct_PSI_block(D, mean=0.0, variance=1.0, proposal_variance=0.001):
     precision = solve(covariance, jnp.eye(D))
     prior = GaussianNatParam(precision=precision, precision_mean=precision @ mean)
 
+    # def _likelihood(context: GibbsContext):
+    #     obs_values, bond_idxs, event_types = context.data
+    #     zs, etas = context.trajectory
+
+    #     PSI = context.params["psi"]
+    #     R = context.params["R"]
+
+    #     indices = jnp.arange(obs_values.shape[0])
+    #     observed_zs = zs[indices, bond_idxs]
+    #     observed_etas = etas[indices, bond_idxs]
+    #     variances = jnp.diag(R)[bond_idxs]
+    #     half_spreads = PSI[bond_idxs] * jnp.exp(observed_zs)
+
+    #     means = jnp.where(
+    #         event_types == 0,
+    #         observed_etas - half_spreads,
+    #         observed_etas + half_spreads,
+    #     )
+    #     log_likelihoods = -0.5 * (jnp.log(2 * jnp.pi * variances) + (obs_values - means)**2 / variances)
+
+    #     # D2D observations do not depend on PSI
+    #     return jnp.bincount(
+    #         bond_idxs,
+    #         weights=jnp.where(event_types < 2, log_likelihoods, 0.0),
+    #         length=D,
+    #     )
+
     def _likelihood(context: GibbsContext):
         obs_values, bond_idxs, event_types = context.data
         zs, etas = context.trajectory
 
-        PSI = context.params["psi"]
-        R = context.params["R"]
-
-        indices = jnp.arange(obs_values.shape[0])
-        observed_zs = zs[indices, bond_idxs]
-        observed_etas = etas[indices, bond_idxs]
-        variances = jnp.diag(R)[bond_idxs]
-        half_spreads = PSI[bond_idxs] * jnp.exp(observed_zs)
-
-        means = jnp.where(
-            event_types == 0,
-            observed_etas - half_spreads,
-            observed_etas + half_spreads,
+        # Metropolis supplies the candidate's unpacked psi in context.params.
+        log_likelihoods = vmap(lambda x, data: log_ht(context.params, x, data))(
+            (zs, etas),
+            (obs_values, bond_idxs, event_types),
         )
-        log_likelihoods = -0.5 * (jnp.log(2 * jnp.pi * variances) + (obs_values - means)**2 / variances)
-
-        # D2D observations do not depend on PSI
-        return jnp.bincount(
-            bond_idxs,
-            weights=jnp.where(event_types < 2, log_likelihoods, 0.0),
-            length=D,
-        )
-
-        # log_likelihoods = -0.5 * (jnp.log(2 * jnp.pi * variances) + (obs_values - means)**2 / variances)
-
-        # # D2D observations do not depend on PSI
-        # return jnp.sum(jnp.where(event_types < 2, log_likelihoods, 0.0))
+        return jnp.bincount(bond_idxs, weights=log_likelihoods, length=D)
 
     def _unpack(sample: Array):
         return {

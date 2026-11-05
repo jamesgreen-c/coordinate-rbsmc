@@ -119,7 +119,7 @@ class CorporateBondDataset(Dataset):
             "H": inv_stds[:, None] * self.params["H"] * inv_stds[None, :],
             "R": inv_stds[:, None] * self.params["R"] * inv_stds[None, :],
             "psi": self.params["psi"] / stds,
-            "alpha": self.params["alpha"] / stds,
+            # "alpha": self.params["alpha"] / stds,
         }
 
         return CorporateBondDataset(

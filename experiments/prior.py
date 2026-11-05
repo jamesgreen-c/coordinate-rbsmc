@@ -91,7 +91,7 @@ def log_ht(params, x, data: tuple[Array]):
     zs, etas = x
 
     # extract params
-    alpha = params["alpha"]
+    # alpha = params["alpha"]
     psi = params["psi"]
     R = params["R"]
     chol_R = jnp.linalg.cholesky(R)
@@ -99,7 +99,7 @@ def log_ht(params, x, data: tuple[Array]):
     # extract relevant bond dimd
     z_i = zs[..., i]
     eta_i = etas[..., i]
-    alpha_i = alpha[i]
+    # alpha_i = alpha[i]
 
     # retrieve bond-specific emission parameters
     r_i = _diag_or_vector_at(chol_R, i)
@@ -110,11 +110,15 @@ def log_ht(params, x, data: tuple[Array]):
 
     def case_2():
         # D2D: observed Y, condition Y in [eta_i - alpha_i + eps, eta_i + alpha_i + eps]
-        lo = y - eta_i - alpha_i
-        hi = y - eta_i + alpha_i
-        log_hi = norm.logcdf(hi, loc=0.0, scale=r_i)
-        log_lo = norm.logcdf(lo, loc=0.0, scale=r_i)
-        val = _logdiffexp(log_hi, log_lo)
+        lo = y - eta_i - spread_i # alpha_i
+        hi = y - eta_i + spread_i # alpha_i
+        # log_hi = norm.logcdf(hi, loc=0.0, scale=r_i)
+        # log_lo = norm.logcdf(lo, loc=0.0, scale=r_i)
+
+        reflect = lo > 0
+        log_hi = norm.logcdf(jnp.where(reflect, -lo, hi), scale=r_i)
+        log_lo = norm.logcdf(jnp.where(reflect, -hi, lo), scale=r_i)
+        val = _logdiffexp(log_hi, log_lo) - jnp.log(2 * spread_i)
 
         # finite floor for log probs stop infinite loss
         tiny = jnp.log(jnp.finfo(val.dtype).tiny)

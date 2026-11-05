@@ -24,7 +24,7 @@ def emission(
         eta: Array,
         psi: Array,
         chol_R: Array,
-        alpha: Array,
+        # alpha: Array,
         bond_idx: Array,
         event_type: Array,
 ):
@@ -63,12 +63,12 @@ def emission(
     done_sell = eta[i] + spread_i + eps
 
     # observation cases
-    case_0 = lambda: done_buy                                                # client buys from dealer D
-    case_1 = lambda: done_sell                                               # client sells to dealer D
+    case_0 = lambda: done_buy                                                 # client buys from dealer D
+    case_1 = lambda: done_sell                                                # client sells to dealer D
     case_2 = lambda: eta[i] + eps + jr.uniform(key_aux,
                                                shape=(),
-                                               minval=-alpha[i],
-                                               maxval= alpha[i])             # D2D trade: observed Y lies inside an interval around u_i + eps
+                                               minval=-spread_i, # alpha[i],
+                                               maxval= spread_i) # alpha[i])  # D2D trade: observed Y lies inside an interval around u_i + eps
 
     return jax.lax.switch(event_type, [case_0, case_1, case_2])
 
@@ -116,7 +116,7 @@ def get_data(
     H = params["H"]
     R = params["R"]
     PSI = params["psi"]
-    ALPHA = params["alpha"]
+    # ALPHA = params["alpha"]
 
     K = dts.shape[0] + 1
     init_key, event_key, sampling_key = jr.split(key, 3)
@@ -141,7 +141,7 @@ def get_data(
     # t=0 data
     z0 = chol_Q0 @ jr.normal(init_key_z, (dim,))
     eta0 = M0 + chol_H0 @ jr.normal(init_key_eta, (dim,))
-    obs_val0 = emission(keys_y[0], z0, eta0, PSI, chol_R, ALPHA, bond_idxs[0], event_types[0])
+    obs_val0 = emission(keys_y[0], z0, eta0, PSI, chol_R, bond_idxs[0], event_types[0])
     obs0 = (obs_val0, bond_idxs[0], event_types[0])
 
     # t=1,...,T data
@@ -158,7 +158,7 @@ def get_data(
         x_kp1 = (z_kp1, eta_kp1)
 
         # sample observation
-        obs_value = emission(key_y_k, z_kp1, eta_kp1, PSI, chol_R, ALPHA, bond_idx, event_type)
+        obs_value = emission(key_y_k, z_kp1, eta_kp1, PSI, chol_R, bond_idx, event_type)
         obs_kp1 = (obs_value, bond_idx, event_type)
 
         return x_kp1, (x_kp1, obs_kp1)
@@ -217,7 +217,7 @@ def get_model_params(key, D, T, steps, phi):
         H = scale**2 * block_sparse_covariance(H_key, D)
 
     PSI = scale * 0.007 * jnp.ones(D)                  # baseline half-spread: approximately 0.5–0.8 bp
-    ALPHA = scale * 0.005 * jnp.ones(D)                # D2D interval half-width; example value of 0.5 bp
+    # ALPHA = scale * 0.005 * jnp.ones(D)                # D2D interval half-width; example value of 0.5 bp
     DTs = jnp.repeat(T / steps, steps)
 
     params = {
@@ -229,7 +229,7 @@ def get_model_params(key, D, T, steps, phi):
         "H": H,
         "R": R,
         "psi": PSI,
-        "alpha": ALPHA,
+        # "alpha": ALPHA,
     }
 
     return params, DTs
