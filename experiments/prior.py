@@ -92,9 +92,9 @@ def log_ht(params, x, data: tuple[Array]):
 
     # extract params
     # alpha = params["alpha"]
+    # R = params["R"]
+    # chol_R = jnp.linalg.cholesky(R)
     psi = params["psi"]
-    R = params["R"]
-    chol_R = jnp.linalg.cholesky(R)
 
     # extract relevant bond dimd
     z_i = zs[..., i]
@@ -102,8 +102,9 @@ def log_ht(params, x, data: tuple[Array]):
     # alpha_i = alpha[i]
 
     # retrieve bond-specific emission parameters
-    r_i = _diag_or_vector_at(chol_R, i)
+    # r_i = _diag_or_vector_at(chol_R, i)
     spread_i = psi[i] * jnp.exp(z_i)
+    r_i = 0.05 * (2 * spread_i)
 
     case_0 = lambda: norm.logpdf(y, loc=eta_i - spread_i, scale=r_i)          # D2C buy: Y = eta_i - psi_i + eps
     case_1 = lambda: norm.logpdf(y, loc=eta_i + spread_i, scale=r_i)          # D2C sell: Y = eta_i + psi_i + eps

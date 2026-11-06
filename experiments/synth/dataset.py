@@ -117,7 +117,7 @@ class CorporateBondDataset(Dataset):
             "m0": inv_stds * (self.params["m0"] - means),
             "H0": inv_stds[:, None] * self.params["H0"] * inv_stds[None, :],
             "H": inv_stds[:, None] * self.params["H"] * inv_stds[None, :],
-            "R": inv_stds[:, None] * self.params["R"] * inv_stds[None, :],
+            # "R": inv_stds[:, None] * self.params["R"] * inv_stds[None, :],
             "psi": self.params["psi"] / stds,
             # "alpha": self.params["alpha"] / stds,
         }

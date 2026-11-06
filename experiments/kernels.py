@@ -401,12 +401,12 @@ class GueantCSMC(FeynmanKac):
         ):
         A = params["A"]
         Q = params["Q"]
-        R = params["R"]
+        # R = params["R"]
         H = params["H"]
         # alpha = params["alpha"]
         psi = params["psi"]
 
-        chol_R = jnp.linalg.cholesky(R)
+        # chol_R = jnp.linalg.cholesky(R)
         chol_H = jnp.linalg.cholesky(H)
         Fs, chol_Qs = vmap(lambda dt: ou_diag_transition(A, Q, dt))(self.dts)
 
@@ -425,7 +425,7 @@ class GueantCSMC(FeynmanKac):
             key, state,
             M_0, Gamma_0,
             inps, Gamma_t_plus_params,
-            chol_H, chol_R, psi, # alpha, psi,
+            chol_H, psi, # chol_R, alpha, psi,
             N=self.N, conditional=conditional,
             **kwargs
         )
