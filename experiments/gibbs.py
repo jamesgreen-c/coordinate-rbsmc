@@ -33,7 +33,7 @@ def make_blocks(D: int, full_inference: bool = False):
         m0_block = _construct_m0_block(D)
         H0_block = _construct_H0_block(D)
         A_block = _construct_A_block(D)
-        R_block = _construct_R_block(D)
+        # R_block = _construct_R_block(D)
         Q0_block = _construct_Q0_block(D)
         Q_block = _construct_Q_block(D)
         PSI_block = _construct_PSI_block(D)
@@ -42,7 +42,7 @@ def make_blocks(D: int, full_inference: bool = False):
         blocks.extend([
             m0_block, 
             H0_block, 
-            R_block, 
+            # R_block, 
             A_block, 
             Q_block, 
             Q0_block, 
