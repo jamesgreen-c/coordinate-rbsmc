@@ -163,7 +163,8 @@ def _construct_R_block(D, concentration: float = 3.0, scale: float = 0.001):
         zs, etas = context.trajectory
 
         PSI = context.params["psi"]
-        alpha = context.params["alpha"]
+        # alpha = context.params["alpha"]
+
         variances = jnp.diag(context.params["R"])
 
         auxiliary_key, variance_key = jr.split(key)
@@ -177,8 +178,10 @@ def _construct_R_block(D, concentration: float = 3.0, scale: float = 0.001):
             case_1 = lambda _: y - half_spread
 
             def case_2(_):
-                lower = (y - alpha[i] - eta[i]) / std
-                upper = (y + alpha[i] - eta[i]) / std
+                # lower = (y - alpha[i] - eta[i]) / std
+                # upper = (y + alpha[i] - eta[i]) / std
+                lower = (y - half_spread - eta[i]) / std
+                upper = (y + half_spread - eta[i]) / std
                 eps = jr.truncated_normal(key, lower, upper)
                 return eta[i] + std * eps
 
