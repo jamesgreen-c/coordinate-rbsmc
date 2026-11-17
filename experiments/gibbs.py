@@ -37,7 +37,7 @@ def make_blocks(D: int, full_inference: bool = False):
         Q0_block = _construct_Q0_block(D)
         Q_block = _construct_Q_block(D)
         PSI_block = _construct_PSI_block(D)
-        # ALPHA_block = _construct_ALPHA_block(D)
+        ALPHA_block = _construct_ALPHA_block(D)
 
         blocks.extend([
             m0_block, 
@@ -47,7 +47,7 @@ def make_blocks(D: int, full_inference: bool = False):
             Q_block, 
             Q0_block, 
             PSI_block, 
-            # ALPHA_block
+            ALPHA_block
         ])
     
     return blocks
@@ -163,7 +163,7 @@ def _construct_R_block(D, concentration: float = 3.0, scale: float = 0.001):
         zs, etas = context.trajectory
 
         PSI = context.params["psi"]
-        # alpha = context.params["alpha"]
+        alpha = context.params["alpha"]
 
         variances = jnp.diag(context.params["R"])
 
@@ -178,10 +178,10 @@ def _construct_R_block(D, concentration: float = 3.0, scale: float = 0.001):
             case_1 = lambda _: y - half_spread
 
             def case_2(_):
-                # lower = (y - alpha[i] - eta[i]) / std
-                # upper = (y + alpha[i] - eta[i]) / std
-                lower = (y - half_spread - eta[i]) / std
-                upper = (y + half_spread - eta[i]) / std
+                lower = (y - alpha[i] - eta[i]) / std
+                upper = (y + alpha[i] - eta[i]) / std
+                # lower = (y - half_spread - eta[i]) / std
+                # upper = (y + half_spread - eta[i]) / std
                 eps = jr.truncated_normal(key, lower, upper)
                 return eta[i] + std * eps
 
@@ -329,43 +329,43 @@ def _construct_PSI_block(D, mean=0.0, variance=1.0, proposal_variance=0.001):
     precision = solve(covariance, jnp.eye(D))
     prior = GaussianNatParam(precision=precision, precision_mean=precision @ mean)
 
-    # def _likelihood(context: GibbsContext):
-    #     obs_values, bond_idxs, event_types = context.data
-    #     zs, etas = context.trajectory
-
-    #     PSI = context.params["psi"]
-    #     R = context.params["R"]
-
-    #     indices = jnp.arange(obs_values.shape[0])
-    #     observed_zs = zs[indices, bond_idxs]
-    #     observed_etas = etas[indices, bond_idxs]
-    #     variances = jnp.diag(R)[bond_idxs]
-    #     half_spreads = PSI[bond_idxs] * jnp.exp(observed_zs)
-
-    #     means = jnp.where(
-    #         event_types == 0,
-    #         observed_etas - half_spreads,
-    #         observed_etas + half_spreads,
-    #     )
-    #     log_likelihoods = -0.5 * (jnp.log(2 * jnp.pi * variances) + (obs_values - means)**2 / variances)
-
-    #     # D2D observations do not depend on PSI
-    #     return jnp.bincount(
-    #         bond_idxs,
-    #         weights=jnp.where(event_types < 2, log_likelihoods, 0.0),
-    #         length=D,
-    #     )
-
     def _likelihood(context: GibbsContext):
         obs_values, bond_idxs, event_types = context.data
         zs, etas = context.trajectory
 
-        # Metropolis supplies the candidate's unpacked psi in context.params.
-        log_likelihoods = vmap(lambda x, data: log_ht(context.params, x, data))(
-            (zs, etas),
-            (obs_values, bond_idxs, event_types),
+        PSI = context.params["psi"]
+        R = context.params["R"]
+
+        indices = jnp.arange(obs_values.shape[0])
+        observed_zs = zs[indices, bond_idxs]
+        observed_etas = etas[indices, bond_idxs]
+        variances = jnp.diag(R)[bond_idxs]
+        half_spreads = PSI[bond_idxs] * jnp.exp(observed_zs)
+
+        means = jnp.where(
+            event_types == 0,
+            observed_etas - half_spreads,
+            observed_etas + half_spreads,
         )
-        return jnp.bincount(bond_idxs, weights=log_likelihoods, length=D)
+        log_likelihoods = -0.5 * (jnp.log(2 * jnp.pi * variances) + (obs_values - means)**2 / variances)
+
+        # D2D observations do not depend on PSI
+        return jnp.bincount(
+            bond_idxs,
+            weights=jnp.where(event_types < 2, log_likelihoods, 0.0),
+            length=D,
+        )
+
+    # def _likelihood(context: GibbsContext):
+    #     obs_values, bond_idxs, event_types = context.data
+    #     zs, etas = context.trajectory
+
+    #     # Metropolis supplies the candidate's unpacked psi in context.params.
+    #     log_likelihoods = vmap(lambda x, data: log_ht(context.params, x, data))(
+    #         (zs, etas),
+    #         (obs_values, bond_idxs, event_types),
+    #     )
+    #     return jnp.bincount(bond_idxs, weights=log_likelihoods, length=D)
 
     def _unpack(sample: Array):
         return {
