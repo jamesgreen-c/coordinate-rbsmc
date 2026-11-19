@@ -112,10 +112,11 @@ class TraceDataset:
             stds=stds,
         )
 
-    def estimate_R(self) -> Array:
-        """Estimate diagonal emission covariance in the dataset's current units."""
+    def estimate_R_and_alpha(self) -> tuple[Array, Array]:
+        """Estimate R and D2D half-widths in the dataset's current units."""
         obs_values, bond_idxs, event_types = map(np.asarray, self.data)
         variances = np.full(self.D, np.nan)
+        alphas = np.full(self.D, np.nan)
 
         for d in range(self.D):
             bond_mask = bond_idxs == d
@@ -130,11 +131,13 @@ class TraceDataset:
 
             if n_switches:
                 spread = np.abs(np.diff(values)[switches]).mean()
+                alphas[d] = 0.05 * spread
                 variances[d] = (0.05 * spread) ** 2
                 flag = " [only one switch]" if n_switches == 1 else ""
                 print(
                     f"Bond {d}: switches={n_switches}, spread={spread:.6g}, "
-                    f"R[{d}, {d}]={variances[d]:.6g}{flag}"
+                    f"R[{d}, {d}]={variances[d]:.6g}, "
+                    f"alpha[{d}]={alphas[d]:.6g}{flag}"
                 )
             else:
                 buy_sell_values = values[(types == 0) | (types == 1)]
@@ -143,10 +146,58 @@ class TraceDataset:
                     continue
 
                 variances[d] = buy_sell_values.var(ddof=1)
-                print(f"Bond {d}: zero switches, sample variance={variances[d]:.6g}")
+                alphas[d] = 0.05 * np.sqrt(variances[d])
+                print(
+                    f"Bond {d}: zero switches, "
+                    f"sample variance={variances[d]:.6g}, "
+                    f"alpha[{d}]={alphas[d]:.6g}"
+                )
 
-        invalid = np.flatnonzero(~np.isfinite(variances))
+        invalid = np.flatnonzero(
+            ~np.isfinite(variances) | ~np.isfinite(alphas)
+        )
         if invalid.size:
-            raise ValueError(f"Could not estimate emission variance for bonds {invalid.tolist()}")
+            raise ValueError(f"Could not estimate R and alpha for bonds {invalid.tolist()}")
 
-        return jnp.diag(jnp.asarray(variances, dtype=obs_values.dtype))
+        R = jnp.diag(jnp.asarray(variances, dtype=obs_values.dtype))
+        ALPHA = jnp.asarray(alphas, dtype=obs_values.dtype)
+        return R, ALPHA
+    
+    # def estimate_R_and_alpha(self) -> Array:
+    #     """Estimate diagonal emission covariance in the dataset's current units."""
+    #     obs_values, bond_idxs, event_types = map(np.asarray, self.data)
+    #     variances = np.full(self.D, np.nan)
+
+    #     for d in range(self.D):
+    #         bond_mask = bond_idxs == d
+    #         values = obs_values[bond_mask]
+    #         types = event_types[bond_mask]
+
+    #         previous, current = types[:-1], types[1:]
+    #         switches = ((previous == 0) & (current == 1)) | (
+    #             (previous == 1) & (current == 0)
+    #         )
+    #         n_switches = np.count_nonzero(switches)
+
+    #         if n_switches:
+    #             spread = np.abs(np.diff(values)[switches]).mean()
+    #             variances[d] = (0.05 * spread) ** 2
+    #             flag = " [only one switch]" if n_switches == 1 else ""
+    #             print(
+    #                 f"Bond {d}: switches={n_switches}, spread={spread:.6g}, "
+    #                 f"R[{d}, {d}]={variances[d]:.6g}{flag}"
+    #             )
+    #         else:
+    #             buy_sell_values = values[(types == 0) | (types == 1)]
+    #             if buy_sell_values.size < 2:
+    #                 print(f"Bond {d}: zero switches and fewer than two buy/sell observations")
+    #                 continue
+
+    #             variances[d] = buy_sell_values.var(ddof=1)
+    #             print(f"Bond {d}: zero switches, sample variance={variances[d]:.6g}")
+
+    #     invalid = np.flatnonzero(~np.isfinite(variances))
+    #     if invalid.size:
+    #         raise ValueError(f"Could not estimate emission variance for bonds {invalid.tolist()}")
+
+    #     return jnp.diag(jnp.asarray(variances, dtype=obs_values.dtype))

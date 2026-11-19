@@ -37,7 +37,7 @@ def make_blocks(D: int, full_inference: bool = False):
         Q0_block = _construct_Q0_block(D)
         Q_block = _construct_Q_block(D)
         PSI_block = _construct_PSI_block(D)
-        ALPHA_block = _construct_ALPHA_block(D)
+        # ALPHA_block = _construct_ALPHA_block(D)
 
         blocks.extend([
             m0_block, 
@@ -47,7 +47,7 @@ def make_blocks(D: int, full_inference: bool = False):
             Q_block, 
             Q0_block, 
             PSI_block, 
-            ALPHA_block
+            # ALPHA_block
         ])
     
     return blocks
@@ -383,7 +383,7 @@ def _construct_PSI_block(D, mean=0.0, variance=1.0, proposal_variance=0.001):
     )
 
 
-def _construct_ALPHA_block(D, mean=0.0, variance=1.0, proposal_variance=0.01):
+def _construct_ALPHA_block(D, mean=0.0, variance=0.1, proposal_variance=0.01):
 
     mean = jnp.broadcast_to(jnp.asarray(mean), (D,))
     covariance = variance * jnp.eye(D)
