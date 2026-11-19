@@ -51,11 +51,10 @@ args = parser.parse_args()
 RESULTS_ROOT = args.root.expanduser().resolve() / "results"
 
 # DATASET
-DATASET = get_data("files/cleaned_trace.csv")
-SCALED_DATASET = DATASET.standardised_data
+DATASET = get_data("files/cleaned_trace.csv", n_bonds=5)
+SCALED_DATASET = DATASET # DATASET.standardised_data
 R, ALPHA = SCALED_DATASET.estimate_R_and_alpha()
 
-exit()
 
 # SMC CONFIG
 kernel = KernelType(args.kernel).kernel_maker(N=args.N, D=DATASET.D, dts=DATASET.dts)
@@ -116,7 +115,7 @@ def experiment():
         references_m, params_m, replacement_rates_m, run_times_m = SAMPLER.run(
             SCALED_DATASET.data, 
             SCALED_DATASET.dts, 
-            {"R": R, "alpha": ALPHA}        # fix R
+            {"R": R, "alpha": ALPHA}        # fix R and alpha
         )
         
         references.append(tree_util.tree_map(np.asarray, references_m))
