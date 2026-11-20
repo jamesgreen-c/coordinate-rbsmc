@@ -92,9 +92,9 @@ def log_ht(params, x, data: tuple[Array]):
 
     # extract params
     alpha = params["alpha"]
+    psi = params["psi"]
     R = params["R"]
     chol_R = jnp.linalg.cholesky(R)
-    psi = params["psi"]
 
     # extract relevant bond dimd
     z_i = zs[..., i]
@@ -104,26 +104,20 @@ def log_ht(params, x, data: tuple[Array]):
     # retrieve bond-specific emission parameters
     r_i = _diag_or_vector_at(chol_R, i)
     spread_i = psi[i] * jnp.exp(z_i)
-    # r_i = 0.05 * (2 * spread_i)
 
     case_0 = lambda: norm.logpdf(y, loc=eta_i - spread_i, scale=r_i)          # D2C buy: Y = eta_i - psi_i + eps
     case_1 = lambda: norm.logpdf(y, loc=eta_i + spread_i, scale=r_i)          # D2C sell: Y = eta_i + psi_i + eps
 
     def case_2():
         # D2D: observed Y, condition Y in [eta_i - alpha_i + eps, eta_i + alpha_i + eps]
-        lo = y - eta_i - alpha_i  # spread_i
-        hi = y - eta_i + alpha_i  # spread_i
-        # log_hi = norm.logcdf(hi, loc=0.0, scale=r_i)
-        # log_lo = norm.logcdf(lo, loc=0.0, scale=r_i)
-
-        reflect = lo > 0
-        log_hi = norm.logcdf(jnp.where(reflect, -lo, hi), scale=r_i)
-        log_lo = norm.logcdf(jnp.where(reflect, -hi, lo), scale=r_i)
-        val = _logdiffexp(log_hi, log_lo) - jnp.log(2 * alpha_i) # spread_i)
+        lo = y - eta_i - alpha_i
+        hi = y - eta_i + alpha_i
+        log_hi = norm.logcdf(hi, loc=0.0, scale=r_i)
+        log_lo = norm.logcdf(lo, loc=0.0, scale=r_i)
+        val = _logdiffexp(log_hi, log_lo)
 
         # finite floor for log probs stop infinite loss
         tiny = jnp.log(jnp.finfo(val.dtype).tiny)
         return jnp.maximum(val, tiny)
     
     return jax.lax.switch(obs_type, [case_0, case_1, case_2])
-

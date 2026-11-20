@@ -11,8 +11,6 @@ from rbsmc.bayesian.gibbs import ConjugateBlock, ConditionalBlock, GibbsContext
 from rbsmc.dists import GaussianNatParam, InverseGammaNatParam
 from rbsmc.bayesian.metropolis import RandomWalkMetropolis
 
-from experiments.prior import log_ht
-
 ##########################
 #     horseshoe prior    #
 ##########################
@@ -164,7 +162,6 @@ def _construct_R_block(D, concentration: float = 3.0, scale: float = 0.001):
 
         PSI = context.params["psi"]
         alpha = context.params["alpha"]
-
         variances = jnp.diag(context.params["R"])
 
         auxiliary_key, variance_key = jr.split(key)
@@ -180,8 +177,6 @@ def _construct_R_block(D, concentration: float = 3.0, scale: float = 0.001):
             def case_2(_):
                 lower = (y - alpha[i] - eta[i]) / std
                 upper = (y + alpha[i] - eta[i]) / std
-                # lower = (y - half_spread - eta[i]) / std
-                # upper = (y + half_spread - eta[i]) / std
                 eps = jr.truncated_normal(key, lower, upper)
                 return eta[i] + std * eps
 
@@ -356,16 +351,10 @@ def _construct_PSI_block(D, mean=0.0, variance=1.0, proposal_variance=0.001):
             length=D,
         )
 
-    # def _likelihood(context: GibbsContext):
-    #     obs_values, bond_idxs, event_types = context.data
-    #     zs, etas = context.trajectory
+        # log_likelihoods = -0.5 * (jnp.log(2 * jnp.pi * variances) + (obs_values - means)**2 / variances)
 
-    #     # Metropolis supplies the candidate's unpacked psi in context.params.
-    #     log_likelihoods = vmap(lambda x, data: log_ht(context.params, x, data))(
-    #         (zs, etas),
-    #         (obs_values, bond_idxs, event_types),
-    #     )
-    #     return jnp.bincount(bond_idxs, weights=log_likelihoods, length=D)
+        # # D2D observations do not depend on PSI
+        # return jnp.sum(jnp.where(event_types < 2, log_likelihoods, 0.0))
 
     def _unpack(sample: Array):
         return {
@@ -383,7 +372,7 @@ def _construct_PSI_block(D, mean=0.0, variance=1.0, proposal_variance=0.001):
     )
 
 
-def _construct_ALPHA_block(D, mean=0.0, variance=0.1, proposal_variance=0.01):
+def _construct_ALPHA_block(D, mean=0.0, variance=1.0, proposal_variance=0.01):
 
     mean = jnp.broadcast_to(jnp.asarray(mean), (D,))
     covariance = variance * jnp.eye(D)
