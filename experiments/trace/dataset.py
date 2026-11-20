@@ -131,8 +131,8 @@ class TraceDataset:
 
             if n_switches:
                 spread = np.abs(np.diff(values)[switches]).mean()
-                alphas[d] = 0.05 * spread
-                variances[d] = (0.05 * spread) ** 2
+                alphas[d] = 0.25 * spread       # 0.05 * spread
+                variances[d] = 0.05 * spread    # (0.05 * spread) ** 2
                 flag = " [only one switch]" if n_switches == 1 else ""
                 print(
                     f"Bond {d}: switches={n_switches}, spread={spread:.6g}, "
