@@ -15,6 +15,7 @@ from rbsmc.bayesian.training import ParticleGibbs, Config
 from rbsmc.bayesian.gibbs import Gibbs
 
 from experiments.trace.data import get_data
+from experiments.trace.dataset import get_posterior_R_and_alpha
 from experiments.kernels import KernelType
 from experiments.gibbs import make_blocks
 
@@ -44,6 +45,13 @@ parser.set_defaults(debug=False)
 
 parser.add_argument("--root", type=Path, default=Path.cwd())
 
+parser.add_argument(
+    "--posterior-results",
+    type=Path,
+    default=None,
+    help="Results directory containing data.npz from which to load posterior R and alpha.",
+)
+
 args = parser.parse_args()
 
 
@@ -52,8 +60,14 @@ RESULTS_ROOT = args.root.expanduser().resolve() / "results"
 
 # DATASET
 DATASET = get_data("files/cleaned_trace.csv", n_bonds=5)
-SCALED_DATASET = DATASET # DATASET.standardised_data
-R, ALPHA = SCALED_DATASET.estimate_R_and_alpha()
+
+if args.posterior_results is not None:
+    result_dir = args.posterior_results.expanduser().resolve()
+    R, ALPHA = get_posterior_R_and_alpha(result_dir)
+    init_params = {"R": R, "alpha": ALPHA}
+    print(init_params)
+else:
+    init_params = {}
 
 
 # SMC CONFIG
@@ -113,9 +127,10 @@ def experiment():
         SAMPLER = ParticleGibbs(smc=KERNEL, gibbs=GIBBS, config=config_m)
 
         references_m, params_m, replacement_rates_m, run_times_m = SAMPLER.run(
-            SCALED_DATASET.data, 
-            SCALED_DATASET.dts, 
-            {"R": R, "alpha": ALPHA}        # fix R and alpha
+            DATASET.data, 
+            DATASET.dts, 
+            init_params
+            # {"R": R, "alpha": ALPHA}        # fix R and alpha
         )
         
         references.append(tree_util.tree_map(np.asarray, references_m))
@@ -150,14 +165,10 @@ if __name__ == "__main__":
     # save results
     RESULTS_ROOT.mkdir(parents=True, exist_ok=True)
 
-    experiment_name = "kernel={},N={},samples={},burnin={},seed={},backward={}"
-    experiment_name = experiment_name.format(
-        kernel.name,
-        args.N,
-        args.samples,
-        args.burnin,
-        args.seed,
-        BACKWARD_MODE,
+    observation_mode = "fixed" if args.posterior_results is not None else "infer"
+    experiment_name = (
+        f"{kernel.name},N={args.N},s={args.samples},b={args.burnin},"
+        f"seed={args.seed},backward={BACKWARD_MODE},Ralpha={observation_mode}"
     )
 
     DIRPATH = RESULTS_ROOT / experiment_name
@@ -170,9 +181,11 @@ if __name__ == "__main__":
         params=params,
         replacement_rates=replacement_rates,
         dataset=DATASET,
-        standardisation_means=SCALED_DATASET.means,
-        standardisation_scales=SCALED_DATASET.stds,
+        # standardisation_means=SCALED_DATASET.means,
+        # standardisation_scales=SCALED_DATASET.stds,
         config=_pack_object(asdict(CONFIG)),
         run_seconds=run_times,
         sampling_seconds=sampling_times
     )
+
+    print(f"Saved results to: {DIRPATH}", flush=True)
