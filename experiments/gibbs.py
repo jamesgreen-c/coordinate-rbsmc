@@ -15,7 +15,7 @@ from rbsmc.bayesian.metropolis import RandomWalkMetropolis
 #     horseshoe prior    #
 ##########################
 
-def make_blocks(D: int, full_inference: bool = False):
+def make_blocks(D: int, full_inference: bool = False, ralpha: bool = True):
     """
     
     Parameters
@@ -47,6 +47,12 @@ def make_blocks(D: int, full_inference: bool = False):
             PSI_block, 
             # ALPHA_block
         ])
+
+    if ralpha:
+        R_block = _construct_R_block(D)
+        ALPHA_block = _construct_ALPHA_block(D)
+        blocks.extend([R_block, ALPHA_block])
+
     
     return blocks
 

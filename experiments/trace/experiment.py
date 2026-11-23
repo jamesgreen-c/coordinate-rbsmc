@@ -111,7 +111,7 @@ Configuration
 def experiment():
 
     # gibbs config
-    BLOCKS = make_blocks(D=DATASET.D, full_inference=True)
+    BLOCKS = make_blocks(D=DATASET.D, full_inference=True, ralpha=args.posterior_results is None)
     GIBBS = Gibbs(blocks=BLOCKS)
 
     references = []
