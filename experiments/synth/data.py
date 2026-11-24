@@ -23,8 +23,8 @@ def emission(
         z: Array,
         eta: Array,
         psi: Array,
-        # chol_R: Array,
-        # alpha: Array,
+        chol_R: Array,
+        alpha: Array,
         bond_idx: Array,
         event_type: Array,
 ):
@@ -52,23 +52,23 @@ def emission(
     """
 
     key_eps, key_aux = jr.split(key)
-    # r = _diag_or_vector_at(chol_R, i)
 
     i = bond_idx
+    r = _diag_or_vector_at(chol_R, i)
+
     spread_i = psi[i] * jnp.exp(z[i])
-    r = 0.05 * (2 * spread_i)
     eps = r * jr.normal(key_eps)
 
     done_buy = eta[i] - spread_i + eps
     done_sell = eta[i] + spread_i + eps
 
     # observation cases
-    case_0 = lambda: done_buy                                                 # client buys from dealer D
-    case_1 = lambda: done_sell                                                # client sells to dealer D
+    case_0 = lambda: done_buy                                                # client buys from dealer D
+    case_1 = lambda: done_sell                                               # client sells to dealer D
     case_2 = lambda: eta[i] + eps + jr.uniform(key_aux,
                                                shape=(),
-                                               minval=-spread_i, # alpha[i],
-                                               maxval= spread_i) # alpha[i])  # D2D trade: observed Y lies inside an interval around u_i + eps
+                                               minval=-alpha[i],
+                                               maxval= alpha[i])             # D2D trade: observed Y lies inside an interval around u_i + eps
 
     return jax.lax.switch(event_type, [case_0, case_1, case_2])
 
@@ -114,9 +114,9 @@ def get_data(
     M0 = params["m0"]
     H0 = params["H0"]
     H = params["H"]
-    # R = params["R"]
+    R = params["R"]
     PSI = params["psi"]
-    # ALPHA = params["alpha"]
+    ALPHA = params["alpha"]
 
     K = dts.shape[0] + 1
     init_key, event_key, sampling_key = jr.split(key, 3)
@@ -127,7 +127,7 @@ def get_data(
     chol_Q0 = jnp.linalg.cholesky(Q0)
     chol_H0 = jnp.linalg.cholesky(H0)
     chol_H = jnp.linalg.cholesky(H)
-    # chol_R = jnp.linalg.cholesky(R)
+    chol_R = jnp.linalg.cholesky(R)
 
     # presample observation quantities
     bond_weights = jnp.ones((dim,))
@@ -141,7 +141,7 @@ def get_data(
     # t=0 data
     z0 = chol_Q0 @ jr.normal(init_key_z, (dim,))
     eta0 = M0 + chol_H0 @ jr.normal(init_key_eta, (dim,))
-    obs_val0 = emission(keys_y[0], z0, eta0, PSI, bond_idxs[0], event_types[0])
+    obs_val0 = emission(keys_y[0], z0, eta0, PSI, chol_R, ALPHA, bond_idxs[0], event_types[0])
     obs0 = (obs_val0, bond_idxs[0], event_types[0])
 
     # t=1,...,T data
@@ -158,7 +158,7 @@ def get_data(
         x_kp1 = (z_kp1, eta_kp1)
 
         # sample observation
-        obs_value = emission(key_y_k, z_kp1, eta_kp1, PSI, bond_idx, event_type)
+        obs_value = emission(key_y_k, z_kp1, eta_kp1, PSI, chol_R, ALPHA, bond_idx, event_type)
         obs_kp1 = (obs_value, bond_idx, event_type)
 
         return x_kp1, (x_kp1, obs_kp1)
@@ -194,7 +194,7 @@ def get_model_params(key, D, T, steps, phi):
     # covariance parameters
     Q0 = 0.1 * jnp.eye(D)                              # initial uncertainty about log half-spreads
     Q = 0.1 * jnp.eye(D)                               # daily log half-spread diffusion covariance
-    # R = (scale * 0.00025)**2 * jnp.eye(D)            # observation-noise standard deviation approximately 0.2–0.3 bp
+    R = (scale * 0.00025)**2 * jnp.eye(D)              # observation-noise standard deviation approximately 0.2–0.3 bp
 
     H0_SCALE = scale * 0.01 * jnp.ones(D)
     CONCENTRATION = 2 * jnp.ones(D)
@@ -217,7 +217,7 @@ def get_model_params(key, D, T, steps, phi):
         H = scale**2 * block_sparse_covariance(H_key, D)
 
     PSI = scale * 0.007 * jnp.ones(D)                  # baseline half-spread: approximately 0.5–0.8 bp
-    # ALPHA = scale * 0.005 * jnp.ones(D)                # D2D interval half-width; example value of 0.5 bp
+    ALPHA = scale * 0.005 * jnp.ones(D)                # D2D interval half-width; example value of 0.5 bp
     DTs = jnp.repeat(T / steps, steps)
 
     params = {
@@ -227,9 +227,9 @@ def get_model_params(key, D, T, steps, phi):
         "H0": H0,
         "Q": Q,
         "H": H,
-        # "R": R,
+        "R": R,
         "psi": PSI,
-        # "alpha": ALPHA,
+        "alpha": ALPHA,
     }
 
     return params, DTs
